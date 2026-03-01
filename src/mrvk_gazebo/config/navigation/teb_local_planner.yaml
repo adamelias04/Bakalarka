@@ -1,0 +1,28 @@
+TebLocalPlannerROS:
+  odom_topic: odom
+  map_frame: map
+
+  # Robot (diff drive)
+  max_vel_x: 5
+  max_vel_x_backwards: 2
+  max_vel_theta: 1.0
+  acc_lim_x: 2.0
+  acc_lim_theta: 2.0
+
+  # Footprint / safety
+  min_obstacle_dist: 0.25
+  inflation_dist: 0.35
+
+  # Goal tolerancie
+  xy_goal_tolerance: 0.20
+  yaw_goal_tolerance: 0.20
+  free_goal_vel: false
+
+  # Optimalizácia
+  teb_autosize: true
+  dt_ref: 0.3
+  dt_hysteresis: 0.1
+  weight_obstacle: 50.0
+  weight_kinematics_nh: 1000.0
+  weight_kinematics_forward_drive: 1.0
+  weight_optimaltime: 1.0

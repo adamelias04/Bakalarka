@@ -1,0 +1,8 @@
+build/
+devel/
+logs/
+*.pyc
+__pycache__/
+.catkin_tools/
+.vscode/
+.idea/

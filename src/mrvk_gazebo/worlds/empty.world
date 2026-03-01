@@ -1,0 +1,70 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="default">
+
+    <gravity>0 0 -9.8</gravity>
+
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <model name="center_box">
+      <static>false</static>
+      <pose>0 0 0.5 0 0 0</pose>
+
+      <link name="link">
+
+        <inertial>
+          <mass>2.0</mass>
+          <inertia>
+            <ixx>0.166</ixx>
+            <iyy>0.166</iyy>
+            <izz>0.166</izz>
+            <ixy>0.0</ixy>
+            <ixz>0.0</ixz>
+            <iyz>0.0</iyz>
+          </inertia>
+        </inertial>
+
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>1 1 1</size>
+            </box>
+          </geometry>
+        </collision>
+
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>1 1 1</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>1 0 0 1</ambient>
+            <diffuse>1 0 0 1</diffuse>
+          </material>
+        </visual>
+
+      </link>
+
+      <plugin name="oscillate_box_plugin" filename="liboscillate_box_plugin.so">
+        <axis>y</axis>
+        <amplitude>3.0</amplitude>
+        <frequency>0.05</frequency>
+      </plugin>
+
+    </model>
+
+    <physics type="ode">
+      <max_step_size>0.01</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>100</real_time_update_rate>
+    </physics>
+
+  </world>
+</sdf>

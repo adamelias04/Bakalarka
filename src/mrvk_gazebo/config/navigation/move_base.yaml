@@ -1,0 +1,35 @@
+
+### VYPNUTY GLOBAL PLANNER
+#base_global_planner: ""
+base_global_planner: navfn/NavfnROS
+
+# Trajectory Planner ROS
+# base_local_planner: base_local_planner/TrajectoryPlannerROS
+
+#DWA
+# base_local_planner: dwa_local_planner/DWAPlannerROS
+
+# TEB
+base_local_planner: teb_local_planner/TebLocalPlannerROS
+
+recovery_behaviors: [{name: conservative_reset, type: clear_costmap_recovery/ClearCostmapRecovery}, 
+                     {name: rotate_recovery, type: rotate_recovery/RotateRecovery}, 
+                     {name: aggressive_reset, type: clear_costmap_recovery/ClearCostmapRecovery}]
+
+
+### FREKVENCIA NA 0
+#planner_frequency: 0.0
+controller_frequency: 20.0
+
+
+
+planner_patience: 1.0
+controller_patience: 3.0
+conservative_reset_dist: 3.0
+recovery_behavior_enabled: false
+clearing_rotation_allowed: false
+shutdown_costmaps: false
+oscillation_timeout: 0.0
+oscillation_distance: 0.5
+planner_frequency: 5.0
+max_planning_retries: 5

@@ -1,0 +1,42 @@
+<launch>
+    <arg name="paused" default="false"/>
+    <arg name="use_sim_time" default="true"/>
+    <arg name="gui" default="true"/>
+    <arg name="headless" default="false"/>
+    <arg name="debug" default="false"/>
+    <arg name="verbose" default="true"/>
+    <arg name="model" default="$(find mrvk_description)/urdf/robot.urdf.xacro"/>
+    <arg name="world_file" default="$(find gazebo_ros)/worlds/corridor_world.world"/>
+    <arg name="init_x" default="0.0"/>
+    <arg name="init_y" default="0.0"/>
+    <arg name="init_z" default="0.0"/>
+    <arg name="init_yaw" default="0.0"/>
+
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <arg name="paused" value="$(arg paused)"/>
+        <arg name="use_sim_time" value="$(arg use_sim_time)"/>
+        <arg name="gui" value="$(arg gui)" />
+        <arg name="headless" value="$(arg headless)"/>
+        <arg name="verbose" value="$(arg verbose)"/>
+        <arg name="world_name" value="$(arg world_file)"/>
+    </include>
+
+    <param name="robot_description" command="$(find xacro)/xacro $(arg model)"/>
+
+    <node name="urdf_spawner" 
+        pkg="gazebo_ros" 
+        type="spawn_model"
+        args="-x $(arg init_x) -y $(arg init_y) -z $(arg init_z) -Y $(arg init_yaw) -unpause -urdf -model robot -param robot_description" 
+        respawn="false"
+        output="screen"/>
+
+    <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher">
+        <param name="publish_frequency" type="double" value="30.0"/>
+    </node>
+
+    <node pkg="joint_state_publisher" type="joint_state_publisher" name="joint_state_publisher">
+        <param name="publish_frequency" type="double" value="30.0"/>
+    </node>
+
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find mrvk_gazebo)/config/rviz/config.rviz" output="screen"/>
+</launch>

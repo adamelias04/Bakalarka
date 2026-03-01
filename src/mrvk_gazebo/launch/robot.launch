@@ -1,0 +1,55 @@
+<launch>
+    <arg name="model" default="$(find mrvk_description)/urdf/robot.urdf.xacro"/>
+    <arg name="odom_topic" default="odom"/>
+    <arg name="laser_topic" default="scan"/>
+
+    <arg name="world_file" default="$(find mrvk_gazebo)/worlds/empty.world"/>
+    
+    <arg name="init_x" default="10"/>
+    <arg name="init_y" default="10"/>
+    <arg name="init_z" default="0.3"/>
+    <arg name="init_yaw" default="-2.5307"/>
+
+    <include file="$(find mrvk_gazebo)/launch/gazebo.launch">
+        <arg name="model" value="$(arg model)"/>
+        <arg name="world_file" value="$(arg world_file)"/>
+        <arg name="init_x" value="$(arg init_x)"/>
+        <arg name="init_y" value="$(arg init_y)"/>
+        <arg name="init_z" value="$(arg init_z)"/>
+        <arg name="init_yaw" value="$(arg init_yaw)"/>
+    </include>
+
+    <node name="rqt_robot_steering" pkg="rqt_robot_steering" type="rqt_robot_steering">
+        <param name="default_topic" value="/shoddy/cmd_vel"/>
+    </node>
+
+    <node name="image_view" pkg="image_view" type="image_view" args="image:=/camera/image_raw"/>
+
+    <node name="slam_gmapping" pkg="gmapping" type="slam_gmapping">
+        <rosparam command="load" file="$(find mrvk_gazebo)/config/slam/gmapping.yaml"/>
+        <remap from="/scan" to="$(arg laser_topic)"/>
+    </node>
+
+    <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
+
+    <!-- GLOBAL COSTMAP VYPNUTÁ -->
+    
+    <rosparam file="$(find mrvk_gazebo)/config/costmap/costmap_common.yaml" command="load" ns="global_costmap"/>
+    <rosparam file="$(find mrvk_gazebo)/config/costmap/global_costmap.yaml" command="load"/>
+    
+
+    <!-- LOCAL COSTMAP ZOSTÁVA -->
+    <rosparam file="$(find mrvk_gazebo)/config/costmap/costmap_common.yaml" command="load" ns="local_costmap"/>
+    <rosparam file="$(find mrvk_gazebo)/config/costmap/local_costmap.yaml" command="load"/>
+
+    <!-- NAVIGATION -->
+    <rosparam file="$(find mrvk_gazebo)/config/navigation/base_local_planner.yaml" command="load"/>
+    <rosparam file="$(find mrvk_gazebo)/config/navigation/move_base.yaml" command="load"/>
+    <rosparam file="$(find mrvk_gazebo)/config/navigation/teb_local_planner.yaml" command="load"/>
+
+    <remap from="/cmd_vel" to="/shoddy/cmd_vel"/>
+    <remap from="odom" to="$(arg odom_topic)"/>
+    <remap from="scan" to="$(arg laser_topic)"/>
+
+</node>
+</launch>

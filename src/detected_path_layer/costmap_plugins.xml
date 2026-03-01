@@ -1,0 +1,5 @@
+<library path="lib/libdetected_path_layer">
+    <class type="costmap_2d::DetectedPathLayer" base_class_type="costmap_2d::Layer">
+        <description>Detected Path Layer that adds obstacles in the positions where path is not detected, the detected path is kept as passable space.</description>
+    </class>
+</library>
