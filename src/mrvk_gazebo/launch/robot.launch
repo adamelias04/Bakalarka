@@ -5,10 +5,10 @@
 
     <arg name="world_file" default="$(find mrvk_gazebo)/worlds/empty.world"/>
     
-    <arg name="init_x" default="10"/>
-    <arg name="init_y" default="10"/>
+    <arg name="init_x" default="3"/>
+    <arg name="init_y" default="0"/>
     <arg name="init_z" default="0.3"/>
-    <arg name="init_yaw" default="-2.5307"/>
+    <arg name="init_yaw" default="3.14"/>
 
     <include file="$(find mrvk_gazebo)/launch/gazebo.launch">
         <arg name="model" value="$(arg model)"/>
@@ -31,18 +31,12 @@
     </node>
 
     <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
-
-    <!-- GLOBAL COSTMAP VYPNUTÁ -->
-    
     <rosparam file="$(find mrvk_gazebo)/config/costmap/costmap_common.yaml" command="load" ns="global_costmap"/>
     <rosparam file="$(find mrvk_gazebo)/config/costmap/global_costmap.yaml" command="load"/>
-    
 
-    <!-- LOCAL COSTMAP ZOSTÁVA -->
     <rosparam file="$(find mrvk_gazebo)/config/costmap/costmap_common.yaml" command="load" ns="local_costmap"/>
     <rosparam file="$(find mrvk_gazebo)/config/costmap/local_costmap.yaml" command="load"/>
 
-    <!-- NAVIGATION -->
     <rosparam file="$(find mrvk_gazebo)/config/navigation/base_local_planner.yaml" command="load"/>
     <rosparam file="$(find mrvk_gazebo)/config/navigation/move_base.yaml" command="load"/>
     <rosparam file="$(find mrvk_gazebo)/config/navigation/teb_local_planner.yaml" command="load"/>
@@ -50,6 +44,5 @@
     <remap from="/cmd_vel" to="/shoddy/cmd_vel"/>
     <remap from="odom" to="$(arg odom_topic)"/>
     <remap from="scan" to="$(arg laser_topic)"/>
-
 </node>
 </launch>
