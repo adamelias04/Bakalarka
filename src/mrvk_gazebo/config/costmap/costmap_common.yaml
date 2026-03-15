@@ -5,11 +5,11 @@ robot_radius: 0.50
 obstacles:
   enabled: true
   footprint_clearing_enabled: true
-  observation_sources: scan_marking scan_clearing
+  observation_sources: scan_marking scan_clearing predicted_obstacles
 
   scan_marking:
     data_type: LaserScan
-    topic: scan
+    topic: /scan
     sensor_frame: sensor_laser_link
     marking: true
     clearing: false
@@ -19,7 +19,7 @@ obstacles:
 
   scan_clearing:
     data_type: LaserScan
-    topic: scan
+    topic: /scan
     sensor_frame: sensor_laser_link
     marking: false
     clearing: true
@@ -27,12 +27,23 @@ obstacles:
     obstacle_range: 3.4
     raytrace_range: 3.7
 
-  observation_persistence: 5
+  predicted_obstacles:
+    data_type: PointCloud
+    topic: /predicted_obstacle_cloud
+    marking: true
+    clearing: false
+    min_obstacle_height: 0.0
+    max_obstacle_height: 2.0
+    obstacle_range: 5.0
+    raytrace_range: 5.5
+    expected_update_rate: 0.0
+
+  observation_persistence: 0.0
   expected_update_rate: 0.0
 
 inflation_layer:
   enabled: true
-  inflation_radius: 1
+  inflation_radius: 1.0
   cost_scaling_factor: 4.0
 
 obstacle_range: 3.4

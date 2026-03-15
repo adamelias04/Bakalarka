@@ -1,10 +1,10 @@
 <launch>
     <arg name="model" default="$(find mrvk_description)/urdf/robot.urdf.xacro"/>
     <arg name="odom_topic" default="odom"/>
-    <arg name="laser_topic" default="scan"/>
+    <arg name="laser_topic" default="/scan"/>
 
     <arg name="world_file" default="$(find mrvk_gazebo)/worlds/empty.world"/>
-    
+
     <arg name="init_x" default="3"/>
     <arg name="init_y" default="0"/>
     <arg name="init_z" default="0.3"/>
@@ -23,6 +23,54 @@
         <param name="default_topic" value="/shoddy/cmd_vel"/>
     </node>
 
+    <node pkg="mrvk_gazebo"
+          type="dynamic_obstacle_predictor"
+          name="dynamic_obstacle_predictor"
+          output="screen">
+
+        <param name="scan_topic" value="$(arg laser_topic)"/>
+        <param name="output_frame" value="odom"/>
+
+        <param name="prediction_time" value="1.0"/>
+        <param name="prediction_dt" value="0.1"/>
+
+        <param name="alpha_gain" value="0.65"/>
+        <param name="beta_gain" value="0.20"/>
+        <param name="max_speed" value="2.0"/>
+        <param name="track_timeout" value="0.8"/>
+        <param name="lost_track_prediction_time" value="1.0"/>
+
+        <param name="point_spacing" value="0.05"/>
+        <param name="corridor_radius" value="0.18"/>
+        <param name="z_height" value="0.10"/>
+
+        <param name="scan_range_min_use" value="0.10"/>
+        <param name="scan_range_max_use" value="8.00"/>
+
+        <param name="segment_jump_distance" value="0.30"/>
+        <param name="segment_min_points" value="2"/>
+        <param name="segment_max_points" value="120"/>
+
+        <param name="segment_min_width" value="0.03"/>
+        <param name="segment_max_width" value="2.00"/>
+
+        <!-- NA ZACIATOK ROI VYPNUTE -->
+        <param name="use_angle_roi" value="false"/>
+        <param name="angle_min_roi" value="-1.57"/>
+        <param name="angle_max_roi" value="1.57"/>
+
+        <param name="use_range_roi" value="false"/>
+        <param name="range_min_roi" value="0.20"/>
+        <param name="range_max_roi" value="8.00"/>
+
+        <param name="initial_expected_angle" value="0.0"/>
+        <param name="initial_expected_range" value="2.5"/>
+
+        <param name="max_association_distance" value="1.5"/>
+
+        <param name="publish_debug_segment" value="true"/>
+    </node>
+
     <node name="image_view" pkg="image_view" type="image_view" args="image:=/camera/image_raw"/>
 
     <node name="slam_gmapping" pkg="gmapping" type="slam_gmapping">
@@ -31,18 +79,18 @@
     </node>
 
     <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
-    <rosparam file="$(find mrvk_gazebo)/config/costmap/costmap_common.yaml" command="load" ns="global_costmap"/>
-    <rosparam file="$(find mrvk_gazebo)/config/costmap/global_costmap.yaml" command="load"/>
+        <rosparam file="$(find mrvk_gazebo)/config/costmap/costmap_common.yaml" command="load" ns="global_costmap"/>
+        <rosparam file="$(find mrvk_gazebo)/config/costmap/global_costmap.yaml" command="load"/>
 
-    <rosparam file="$(find mrvk_gazebo)/config/costmap/costmap_common.yaml" command="load" ns="local_costmap"/>
-    <rosparam file="$(find mrvk_gazebo)/config/costmap/local_costmap.yaml" command="load"/>
+        <rosparam file="$(find mrvk_gazebo)/config/costmap/costmap_common.yaml" command="load" ns="local_costmap"/>
+        <rosparam file="$(find mrvk_gazebo)/config/costmap/local_costmap.yaml" command="load"/>
 
-    <rosparam file="$(find mrvk_gazebo)/config/navigation/base_local_planner.yaml" command="load"/>
-    <rosparam file="$(find mrvk_gazebo)/config/navigation/move_base.yaml" command="load"/>
-    <rosparam file="$(find mrvk_gazebo)/config/navigation/teb_local_planner.yaml" command="load"/>
+        <rosparam file="$(find mrvk_gazebo)/config/navigation/base_local_planner.yaml" command="load"/>
+        <rosparam file="$(find mrvk_gazebo)/config/navigation/move_base.yaml" command="load"/>
+        <rosparam file="$(find mrvk_gazebo)/config/navigation/teb_local_planner.yaml" command="load"/>
 
-    <remap from="/cmd_vel" to="/shoddy/cmd_vel"/>
-    <remap from="odom" to="$(arg odom_topic)"/>
-    <remap from="scan" to="$(arg laser_topic)"/>
-</node>
+        <remap from="/cmd_vel" to="/shoddy/cmd_vel"/>
+        <remap from="odom" to="$(arg odom_topic)"/>
+        <remap from="scan" to="$(arg laser_topic)"/>
+    </node>
 </launch>
