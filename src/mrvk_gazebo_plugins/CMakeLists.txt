@@ -5,12 +5,10 @@ find_package(catkin REQUIRED)
 find_package(gazebo REQUIRED)
 
 catkin_package(
-  INCLUDE_DIRS include
   LIBRARIES oscillate_box_plugin
 )
 
 include_directories(
-  include
   ${catkin_INCLUDE_DIRS}
   ${GAZEBO_INCLUDE_DIRS}
 )
@@ -28,4 +26,3 @@ target_link_libraries(oscillate_box_plugin
 install(TARGETS oscillate_box_plugin
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
 )
-

@@ -63,6 +63,7 @@ public:
 
         pnh.param<double>("point_spacing", point_spacing_, 0.05);
         pnh.param<double>("corridor_radius", corridor_radius_, 0.18);
+        pnh.param<double>("object_half_extent", object_half_extent_, 0.18);
         pnh.param<double>("z_height", z_height_, 0.10);
 
         pnh.param<double>("scan_range_min_use", scan_range_min_use_, 0.10);
@@ -133,6 +134,7 @@ private:
 
     double point_spacing_;
     double corridor_radius_;
+    double object_half_extent_;
     double z_height_;
 
     double scan_range_min_use_;
@@ -210,6 +212,19 @@ private:
         const double dx = a.x - b.x;
         const double dy = a.y - b.y;
         return std::sqrt(dx * dx + dy * dy);
+    }
+
+    Point2D predictTrackPosition(const ros::Time& stamp) const
+    {
+        Point2D predicted = tracked_position_;
+
+        if (!has_track_)
+            return predicted;
+
+        const double dt = std::max(0.0, (stamp - last_track_stamp_).toSec());
+        predicted.x += vx_ * dt;
+        predicted.y += vy_ * dt;
+        return predicted;
     }
 
     std::vector<ScanPoint> extractValidPoints(const sensor_msgs::LaserScan::ConstPtr& scan_msg)
@@ -315,6 +330,73 @@ private:
         return p;
     }
 
+    Point2D shiftPoint(const Point2D& origin, const Point2D& dir, double distance) const
+    {
+        Point2D shifted;
+        shifted.x = origin.x + dir.x * distance;
+        shifted.y = origin.y + dir.y * distance;
+        return shifted;
+    }
+
+    bool estimateSegmentCenterLaser(const Segment& s,
+                                    const std::string& laser_frame,
+                                    const ros::Time& stamp,
+                                    Point2D& center_laser)
+    {
+        const Point2D midpoint = segmentMidpointLaser(s);
+        const ScanPoint& first = s.points.front();
+        const ScanPoint& last  = s.points.back();
+
+        Point2D tangent;
+        tangent.x = last.x_laser - first.x_laser;
+        tangent.y = last.y_laser - first.y_laser;
+
+        const double tangent_norm = std::sqrt(tangent.x * tangent.x + tangent.y * tangent.y);
+        if (tangent_norm < 1e-6)
+        {
+            center_laser = midpoint;
+            return true;
+        }
+
+        tangent.x /= tangent_norm;
+        tangent.y /= tangent_norm;
+
+        Point2D normal_a;
+        normal_a.x = -tangent.y;
+        normal_a.y =  tangent.x;
+
+        Point2D normal_b;
+        normal_b.x = -normal_a.x;
+        normal_b.y = -normal_a.y;
+
+        const Point2D candidate_a = shiftPoint(midpoint, normal_a, object_half_extent_);
+        const Point2D candidate_b = shiftPoint(midpoint, normal_b, object_half_extent_);
+
+        if (!has_track_)
+        {
+            const double range_a = std::sqrt(candidate_a.x * candidate_a.x + candidate_a.y * candidate_a.y);
+            const double range_b = std::sqrt(candidate_b.x * candidate_b.x + candidate_b.y * candidate_b.y);
+            center_laser = (range_a >= range_b) ? candidate_a : candidate_b;
+            return true;
+        }
+
+        Point2D candidate_a_world;
+        Point2D candidate_b_world;
+
+        if (!laserPointToWorld(candidate_a, laser_frame, stamp, candidate_a_world) ||
+            !laserPointToWorld(candidate_b, laser_frame, stamp, candidate_b_world))
+        {
+            center_laser = midpoint;
+            return true;
+        }
+
+        const double score_a = distWorld(candidate_a_world, tracked_position_);
+        const double score_b = distWorld(candidate_b_world, tracked_position_);
+
+        center_laser = (score_a <= score_b) ? candidate_a : candidate_b;
+        return true;
+    }
+
     bool laserPointToWorld(const Point2D& p_laser,
                            const std::string& laser_frame,
                            const ros::Time& stamp,
@@ -352,40 +434,61 @@ private:
         if (segments.empty())
             return false;
 
+        const Point2D association_reference = has_track_
+            ? predictTrackPosition(scan_msg->header.stamp)
+            : Point2D{0.0, 0.0};
+
         double best_score = std::numeric_limits<double>::infinity();
         int best_idx = -1;
         Point2D best_world;
 
         for (std::size_t i = 0; i < segments.size(); ++i)
         {
-            Point2D p_laser = segmentMidpointLaser(segments[i]);
-            Point2D p_world;
+            std::vector<Point2D> candidates_laser;
+            Point2D estimated_center_laser;
+            if (estimateSegmentCenterLaser(segments[i], scan_msg->header.frame_id, scan_msg->header.stamp, estimated_center_laser))
+                candidates_laser.push_back(estimated_center_laser);
+            candidates_laser.push_back(segmentMidpointLaser(segments[i]));
 
-            if (!laserPointToWorld(p_laser, scan_msg->header.frame_id, scan_msg->header.stamp, p_world))
-                continue;
+            double segment_best_score = std::numeric_limits<double>::infinity();
+            Point2D segment_best_world;
 
-            double score = 0.0;
-
-            if (has_track_)
+            for (const Point2D& candidate_laser : candidates_laser)
             {
-                const double d = distWorld(p_world, tracked_position_);
-                if (d > max_association_distance_)
+                Point2D candidate_world;
+                if (!laserPointToWorld(candidate_laser, scan_msg->header.frame_id, scan_msg->header.stamp, candidate_world))
                     continue;
 
-                score = d;
-            }
-            else
-            {
-                const double da = segments[i].mean_angle - initial_expected_angle_;
-                const double dr = segments[i].mean_range - initial_expected_range_;
-                score = std::sqrt(da * da + dr * dr);
+                double score = 0.0;
+
+                if (has_track_)
+                {
+                    const double d = distWorld(candidate_world, association_reference);
+                    const double effective_max_association_distance = max_association_distance_ + object_half_extent_;
+                    if (d > effective_max_association_distance)
+                        continue;
+
+                    score = d;
+                }
+                else
+                {
+                    const double da = segments[i].mean_angle - initial_expected_angle_;
+                    const double dr = segments[i].mean_range - initial_expected_range_;
+                    score = std::sqrt(da * da + dr * dr);
+                }
+
+                if (score < segment_best_score)
+                {
+                    segment_best_score = score;
+                    segment_best_world = candidate_world;
+                }
             }
 
-            if (score < best_score)
+            if (segment_best_score < best_score)
             {
-                best_score = score;
+                best_score = segment_best_score;
                 best_idx = static_cast<int>(i);
-                best_world = p_world;
+                best_world = segment_best_world;
             }
         }
 
@@ -492,6 +595,11 @@ private:
 
     void publishVelocityMarker(const ros::Time& stamp)
     {
+        publishVelocityMarker(tracked_position_, stamp);
+    }
+
+    void publishVelocityMarker(const Point2D& origin, const ros::Time& stamp)
+    {
         if (!has_track_)
             return;
 
@@ -514,12 +622,12 @@ private:
         geometry_msgs::Point p0;
         geometry_msgs::Point p1;
 
-        p0.x = tracked_position_.x;
-        p0.y = tracked_position_.y;
+        p0.x = origin.x;
+        p0.y = origin.y;
         p0.z = z_height_;
 
-        p1.x = tracked_position_.x + 0.5 * vx_;
-        p1.y = tracked_position_.y + 0.5 * vy_;
+        p1.x = origin.x + 0.5 * vx_;
+        p1.y = origin.y + 0.5 * vy_;
         p1.z = z_height_;
 
         marker.points.push_back(p0);
@@ -529,6 +637,11 @@ private:
     }
 
     void publishPrediction(const ros::Time& stamp, double horizon)
+    {
+        publishPredictionFrom(tracked_position_, stamp, horizon);
+    }
+
+    void publishPredictionFrom(const Point2D& origin, const ros::Time& stamp, double horizon)
     {
         if (!has_track_)
             return;
@@ -555,14 +668,14 @@ private:
         cloud.header.stamp = stamp;
         cloud.header.frame_id = output_frame_;
 
-        double last_x = tracked_position_.x;
-        double last_y = tracked_position_.y;
+        double last_x = origin.x;
+        double last_y = origin.y;
         double last_z = z_height_;
 
         for (double t = 0.0; t <= horizon + 1e-6; t += prediction_dt_)
         {
-            const double px = tracked_position_.x + vx_ * t;
-            const double py = tracked_position_.y + vy_ * t;
+            const double px = origin.x + vx_ * t;
+            const double py = origin.y + vy_ * t;
             const double pz = z_height_;
 
             geometry_msgs::PoseStamped pose;
@@ -590,7 +703,44 @@ private:
         predicted_path_pub_.publish(path);
         predicted_marker_pub_.publish(marker);
         predicted_cloud_pub_.publish(cloud);
-        publishVelocityMarker(stamp);
+        publishVelocityMarker(origin, stamp);
+    }
+
+    void clearPublishedPrediction(const ros::Time& stamp)
+    {
+        nav_msgs::Path path;
+        path.header.stamp = stamp;
+        path.header.frame_id = output_frame_;
+        predicted_path_pub_.publish(path);
+
+        sensor_msgs::PointCloud cloud;
+        cloud.header.stamp = stamp;
+        cloud.header.frame_id = output_frame_;
+        predicted_cloud_pub_.publish(cloud);
+
+        visualization_msgs::Marker predicted_marker;
+        predicted_marker.header.stamp = stamp;
+        predicted_marker.header.frame_id = output_frame_;
+        predicted_marker.ns = "predicted_obstacle";
+        predicted_marker.id = 0;
+        predicted_marker.action = visualization_msgs::Marker::DELETE;
+        predicted_marker_pub_.publish(predicted_marker);
+
+        visualization_msgs::Marker velocity_marker;
+        velocity_marker.header.stamp = stamp;
+        velocity_marker.header.frame_id = output_frame_;
+        velocity_marker.ns = "predicted_obstacle_velocity";
+        velocity_marker.id = 0;
+        velocity_marker.action = visualization_msgs::Marker::DELETE;
+        velocity_marker_pub_.publish(velocity_marker);
+
+        visualization_msgs::Marker debug_marker;
+        debug_marker.header.stamp = stamp;
+        debug_marker.header.frame_id = output_frame_;
+        debug_marker.ns = "predicted_obstacle_debug_segment";
+        debug_marker.id = 0;
+        debug_marker.action = visualization_msgs::Marker::DELETE;
+        debug_segment_pub_.publish(debug_marker);
     }
 
     void initializeTrack(const Point2D& p, const ros::Time& stamp)
@@ -629,24 +779,35 @@ private:
         if (!has_track_)
         {
             ROS_WARN_THROTTLE(1.0, "%s", reason.c_str());
+            clearPublishedPrediction(stamp);
             return;
         }
 
         const double dt = (stamp - last_track_stamp_).toSec();
+        const double allowed_missing_time = std::min(track_timeout_, lost_track_prediction_time_);
 
-        if (dt < 0.0 || dt > track_timeout_)
+        if (dt < 0.0 || dt > allowed_missing_time)
         {
             ROS_WARN_THROTTLE(1.0, "%s, track expired", reason.c_str());
             resetTrack();
+            clearPublishedPrediction(stamp);
             return;
         }
 
-        tracked_position_.x += vx_ * dt;
-        tracked_position_.y += vy_ * dt;
-        last_track_stamp_ = stamp;
+        Point2D predicted_origin;
+        predicted_origin.x = tracked_position_.x + vx_ * dt;
+        predicted_origin.y = tracked_position_.y + vy_ * dt;
+
+        const double remaining_horizon = std::max(0.0, allowed_missing_time - dt);
+        if (remaining_horizon <= 1e-4)
+        {
+            resetTrack();
+            clearPublishedPrediction(stamp);
+            return;
+        }
 
         ROS_WARN_THROTTLE(1.0, "%s, using predicted continuation", reason.c_str());
-        publishPrediction(stamp, lost_track_prediction_time_);
+        publishPredictionFrom(predicted_origin, stamp, remaining_horizon);
     }
 
     void scanCallback(const sensor_msgs::LaserScan::ConstPtr& scan_msg)

@@ -592,6 +592,14 @@ Visualization Manager:
         predicted_obstacle: true
       Queue Size: 100
       Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /predicted_sweep_safe_zone
+      Name: Predicted Sweep Safe Zone
+      Namespaces:
+        predicted_sweep_safe_zone: true
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

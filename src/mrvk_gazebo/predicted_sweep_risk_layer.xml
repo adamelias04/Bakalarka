@@ -1,0 +1,9 @@
+<library path="lib/libpredicted_sweep_risk_layer">
+  <class name="mrvk_gazebo::PredictedSweepRiskLayer"
+         type="mrvk_gazebo::PredictedSweepRiskLayer"
+         base_class_type="costmap_2d::Layer">
+    <description>
+      Directional swept risk layer based on predicted obstacle path.
+    </description>
+  </class>
+</library>

@@ -31,7 +31,7 @@
         <param name="scan_topic" value="$(arg laser_topic)"/>
         <param name="output_frame" value="odom"/>
 
-        <param name="prediction_time" value="1.0"/>
+        <param name="prediction_time" value="2"/>
         <param name="prediction_dt" value="0.1"/>
 
         <param name="alpha_gain" value="0.65"/>
@@ -42,6 +42,7 @@
 
         <param name="point_spacing" value="0.05"/>
         <param name="corridor_radius" value="0.18"/>
+        <param name="object_half_extent" value="0.18"/>
         <param name="z_height" value="0.10"/>
 
         <param name="scan_range_min_use" value="0.10"/>

@@ -1,7 +1,7 @@
 local_costmap:
   global_frame: odom
   robot_base_frame: base_link
-  update_frequency: 15.0
+  update_frequency: 10.0
   publish_frequency: 10.0
   transform_tolerance: 0.2
   static_map: false
@@ -12,6 +12,8 @@ local_costmap:
   track_unknown_space: false
   unknown_cost_value: 0
   always_send_full_costmap: true
+
   plugins:
     - {name: obstacles, type: "costmap_2d::ObstacleLayer"}
+    - {name: predicted_sweep_risk_layer, type: "mrvk_gazebo::PredictedSweepRiskLayer"}
     - {name: inflation_layer, type: "costmap_2d::InflationLayer"}

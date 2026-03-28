@@ -25,7 +25,7 @@ obstacles:
     clearing: true
     inf_is_valid: true
     obstacle_range: 3.4
-    raytrace_range: 3.7
+    raytrace_range: 7.0
 
   predicted_obstacles:
     data_type: PointCloud
@@ -40,6 +40,34 @@ obstacles:
 
   observation_persistence: 0.0
   expected_update_rate: 0.0
+
+predicted_sweep_risk_layer:
+  enabled: true
+
+  path_topic: /predicted_obstacle_path
+  pose_topic: /detected_obstacle_pose
+  visualization_topic: /predicted_sweep_safe_zone
+
+  corridor_half_width: 0.45
+  side_extra_width: 0.30
+  obstacle_radius: 0.22
+  max_path_length: 2.40
+  velocity_epsilon: 0.03
+  pose_staleness_tolerance: 0.35
+  pose_path_deviation_tolerance: 0.45
+  visualization_z: 0.08
+  visualization_height: 0.04
+  visualization_clearance: 0.55
+  rear_zone_length_scale: 1.5
+  front_zone_length_scale: 1.0
+
+  sweep_cost: 220
+  side_cost: 150
+  body_cost: 252
+
+  use_pose_as_start: true
+  publish_visualization: true
+  require_fresh_observation: true
 
 inflation_layer:
   enabled: true
