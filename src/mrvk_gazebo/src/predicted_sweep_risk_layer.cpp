@@ -5,6 +5,7 @@
 #include <visualization_msgs/Marker.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace mrvk_gazebo
 {
@@ -12,8 +13,13 @@ namespace mrvk_gazebo
 PredictedSweepRiskLayer::PredictedSweepRiskLayer()
     : has_path_(false),
       has_pose_(false),
-      visualization_active_(false)
+      visualization_active_(false),
+      has_cached_motion_(false),
+      cached_motion_length_(0.0),
+      has_cached_geometry_(false)
 {
+    cached_motion_dir_.x = 1.0;
+    cached_motion_dir_.y = 0.0;
 }
 
 void PredictedSweepRiskLayer::onInitialize()
@@ -21,6 +27,7 @@ void PredictedSweepRiskLayer::onInitialize()
     ros::NodeHandle nh("~/" + name_);
 
     current_ = true;
+    enabled_ = true;
 
     nh.param<std::string>("path_topic", path_topic_, std::string("/predicted_obstacle_path"));
     nh.param<std::string>("pose_topic", pose_topic_, std::string("/detected_obstacle_pose"));
@@ -38,10 +45,15 @@ void PredictedSweepRiskLayer::onInitialize()
     nh.param("visualization_clearance", visualization_clearance_, 0.55);
     nh.param("rear_zone_length_scale", rear_zone_length_scale_, 1.5);
     nh.param("front_zone_length_scale", front_zone_length_scale_, 1.0);
+    nh.param("predicted_path_half_width", predicted_path_half_width_, 0.18);
+    nh.param("low_speed_hold_time", low_speed_hold_time_, 0.8);
+    nh.param("min_fallback_length", min_fallback_length_, 1.0);
+    nh.param("geometry_hold_time", geometry_hold_time_, 1.0);
 
     nh.param("sweep_cost", sweep_cost_, 220);
     nh.param("side_cost", side_cost_, 150);
     nh.param("body_cost", body_cost_, 252);
+    nh.param("path_cost", path_cost_, 254);
 
     nh.param("use_pose_as_start", use_pose_as_start_, true);
     nh.param("publish_visualization", publish_visualization_, true);
@@ -92,13 +104,130 @@ double PredictedSweepRiskLayer::distance2d(double x0, double y0, double x1, doub
     return norm2d(x1 - x0, y1 - y0);
 }
 
+double PredictedSweepRiskLayer::pointToSegmentDistance(double px, double py,
+                                                       double x0, double y0,
+                                                       double x1, double y1) const
+{
+    const double dx = x1 - x0;
+    const double dy = y1 - y0;
+    const double len_sq = dx * dx + dy * dy;
+
+    if (len_sq < 1e-9)
+        return distance2d(px, py, x0, y0);
+
+    const double t = clamp01(((px - x0) * dx + (py - y0) * dy) / len_sq);
+    const double proj_x = x0 + t * dx;
+    const double proj_y = y0 + t * dy;
+    return distance2d(px, py, proj_x, proj_y);
+}
+
+void PredictedSweepRiskLayer::stampCircleCost(costmap_2d::Costmap2D& master_grid,
+                                              double wx, double wy,
+                                              double radius,
+                                              unsigned char cost) const
+{
+    const double resolution = master_grid.getResolution();
+    const int cell_radius = std::max(1, static_cast<int>(std::ceil(radius / std::max(resolution, 1e-6))));
+
+    unsigned int center_mx = 0;
+    unsigned int center_my = 0;
+    if (!master_grid.worldToMap(wx, wy, center_mx, center_my))
+        return;
+
+    for (int dy = -cell_radius; dy <= cell_radius; ++dy)
+    {
+        for (int dx = -cell_radius; dx <= cell_radius; ++dx)
+        {
+            const int mx_i = static_cast<int>(center_mx) + dx;
+            const int my_i = static_cast<int>(center_my) + dy;
+
+            if (mx_i < 0 || my_i < 0 ||
+                mx_i >= static_cast<int>(master_grid.getSizeInCellsX()) ||
+                my_i >= static_cast<int>(master_grid.getSizeInCellsY()))
+            {
+                continue;
+            }
+
+            double cell_wx = 0.0;
+            double cell_wy = 0.0;
+            master_grid.mapToWorld(static_cast<unsigned int>(mx_i), static_cast<unsigned int>(my_i), cell_wx, cell_wy);
+
+            if (distance2d(cell_wx, cell_wy, wx, wy) > radius)
+                continue;
+
+            const unsigned char old_cost =
+                master_grid.getCost(static_cast<unsigned int>(mx_i), static_cast<unsigned int>(my_i));
+
+            if (old_cost == costmap_2d::NO_INFORMATION)
+                master_grid.setCost(static_cast<unsigned int>(mx_i), static_cast<unsigned int>(my_i), cost);
+            else
+                master_grid.setCost(static_cast<unsigned int>(mx_i), static_cast<unsigned int>(my_i),
+                                    std::max(old_cost, cost));
+        }
+    }
+}
+
+void PredictedSweepRiskLayer::applyPathTubeCosts(costmap_2d::Costmap2D& master_grid) const
+{
+    if (!has_path_ || latest_path_.poses.empty())
+        return;
+
+    const unsigned char lethal_cost =
+        static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), path_cost_));
+
+    Point2D prev = selectStartPoint();
+    double accumulated = 0.0;
+    const double step = std::max(0.5 * master_grid.getResolution(), 0.02);
+
+    for (const auto& pose_stamped : latest_path_.poses)
+    {
+        Point2D cur;
+        cur.x = pose_stamped.pose.position.x;
+        cur.y = pose_stamped.pose.position.y;
+
+        const double seg = distance2d(prev.x, prev.y, cur.x, cur.y);
+        if (seg < 1e-6)
+        {
+            prev = cur;
+            continue;
+        }
+
+        Point2D seg_end = cur;
+        double used_seg = seg;
+        if (accumulated + seg > max_path_length_)
+        {
+            const double remain = std::max(0.0, max_path_length_ - accumulated);
+            const double ratio = remain / seg;
+            seg_end.x = prev.x + ratio * (cur.x - prev.x);
+            seg_end.y = prev.y + ratio * (cur.y - prev.y);
+            used_seg = remain;
+        }
+
+        const double dx = seg_end.x - prev.x;
+        const double dy = seg_end.y - prev.y;
+        const double length = std::max(distance2d(prev.x, prev.y, seg_end.x, seg_end.y), 1e-6);
+        const int steps = std::max(1, static_cast<int>(std::ceil(length / step)));
+
+        for (int i = 0; i <= steps; ++i)
+        {
+            const double ratio = static_cast<double>(i) / static_cast<double>(steps);
+            const double wx = prev.x + ratio * dx;
+            const double wy = prev.y + ratio * dy;
+            stampCircleCost(master_grid, wx, wy, predicted_path_half_width_, lethal_cost);
+        }
+
+        accumulated += used_seg;
+        if (accumulated >= max_path_length_)
+            break;
+
+        prev = cur;
+    }
+}
+
 bool PredictedSweepRiskLayer::hasUsableGeometry() const
 {
     if (!has_path_ || latest_path_.poses.empty())
-        return false;
-
-    if (require_fresh_observation_ && !hasFreshObservation())
-        return false;
+        return canUseCachedGeometry();
 
     const Point2D start = selectStartPoint();
 
@@ -109,7 +238,7 @@ bool PredictedSweepRiskLayer::hasUsableGeometry() const
             return true;
     }
 
-    return false;
+    return canUseHeldMotion() || canUseCachedGeometry();
 }
 
 bool PredictedSweepRiskLayer::hasFreshObservation() const
@@ -137,6 +266,44 @@ bool PredictedSweepRiskLayer::hasFreshObservation() const
     return true;
 }
 
+bool PredictedSweepRiskLayer::canUseHeldMotion() const
+{
+    if (!has_cached_motion_ || cached_motion_length_ <= 1e-6)
+        return false;
+
+    const ros::Time reference_stamp = !latest_path_.header.stamp.isZero()
+        ? latest_path_.header.stamp
+        : ros::Time::now();
+
+    if (!cached_motion_stamp_.isZero())
+    {
+        const double dt = std::fabs((reference_stamp - cached_motion_stamp_).toSec());
+        if (dt > low_speed_hold_time_)
+            return false;
+    }
+
+    return true;
+}
+
+bool PredictedSweepRiskLayer::canUseCachedGeometry() const
+{
+    if (!has_cached_geometry_)
+        return false;
+
+    const ros::Time reference_stamp = !latest_path_.header.stamp.isZero()
+        ? latest_path_.header.stamp
+        : ros::Time::now();
+
+    if (!cached_geometry_stamp_.isZero())
+    {
+        const double dt = std::fabs((reference_stamp - cached_geometry_stamp_).toSec());
+        if (dt > geometry_hold_time_)
+            return false;
+    }
+
+    return true;
+}
+
 PredictedSweepRiskLayer::Point2D PredictedSweepRiskLayer::selectStartPoint() const
 {
     Point2D start;
@@ -156,8 +323,14 @@ PredictedSweepRiskLayer::Point2D PredictedSweepRiskLayer::selectStartPoint() con
 
 bool PredictedSweepRiskLayer::buildSweepGeometry(SweepGeometry& geometry) const
 {
-    if (!hasUsableGeometry())
-        return false;
+    if (!has_path_ || latest_path_.poses.empty())
+    {
+        if (!canUseCachedGeometry())
+            return false;
+
+        geometry = cached_geometry_;
+        return true;
+    }
 
     geometry.start = selectStartPoint();
 
@@ -195,12 +368,38 @@ bool PredictedSweepRiskLayer::buildSweepGeometry(SweepGeometry& geometry) const
     geometry.length = norm2d(geometry.dir.x, geometry.dir.y);
 
     if (geometry.length < velocity_epsilon_)
-        return false;
+    {
+        if (canUseHeldMotion())
+        {
+            geometry.dir = cached_motion_dir_;
+            geometry.length = std::max(min_fallback_length_, cached_motion_length_);
+            geometry.end = offsetPoint(geometry.start, geometry.dir, geometry.length);
+        }
+        else if (canUseCachedGeometry())
+        {
+            geometry = cached_geometry_;
+            return true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    else
+    {
+        geometry.dir.x /= geometry.length;
+        geometry.dir.y /= geometry.length;
+        cached_motion_dir_ = geometry.dir;
+        cached_motion_length_ = geometry.length;
+        cached_motion_stamp_ = !latest_path_.header.stamp.isZero() ? latest_path_.header.stamp : ros::Time::now();
+        has_cached_motion_ = true;
+    }
 
-    geometry.dir.x /= geometry.length;
-    geometry.dir.y /= geometry.length;
     geometry.normal.x = -geometry.dir.y;
     geometry.normal.y =  geometry.dir.x;
+    cached_geometry_ = geometry;
+    cached_geometry_stamp_ = !latest_path_.header.stamp.isZero() ? latest_path_.header.stamp : ros::Time::now();
+    has_cached_geometry_ = true;
 
     return true;
 }
@@ -239,10 +438,24 @@ PredictedSweepRiskLayer::Point2D PredictedSweepRiskLayer::computeZoneCenter(cons
     return offsetPoint(zone.near_point, zone.dir, 0.5 * zone.length);
 }
 
+PredictedSweepRiskLayer::ZoneGeometry PredictedSweepRiskLayer::computeUnsafeMiddleZone(const SweepGeometry& geometry) const
+{
+    const ZoneGeometry rear_zone = computeRearZone(geometry);
+    const ZoneGeometry front_zone = computeFrontZone(geometry);
+
+    ZoneGeometry zone;
+    zone.near_point = rear_zone.near_point;
+    zone.dir = geometry.dir;
+    zone.length = distance2d(rear_zone.near_point.x, rear_zone.near_point.y,
+                             front_zone.near_point.x, front_zone.near_point.y);
+    return zone;
+}
+
 unsigned char PredictedSweepRiskLayer::computeZoneCostAt(double wx, double wy,
                                                          const SweepGeometry& geometry,
                                                          const ZoneGeometry& zone) const
 {
+    const double outer_half_width = corridor_half_width_ + side_extra_width_;
     const double dx = wx - zone.near_point.x;
     const double dy = wy - zone.near_point.y;
 
@@ -252,26 +465,46 @@ unsigned char PredictedSweepRiskLayer::computeZoneCostAt(double wx, double wy,
     if (longitudinal < 0.0 || longitudinal > zone.length)
         return costmap_2d::FREE_SPACE;
 
+    if (lateral <= corridor_half_width_ || lateral > outer_half_width)
+        return costmap_2d::FREE_SPACE;
+
+    const double zone_ratio = longitudinal / std::max(zone.length, 1e-6);
+    const double long_gain = 0.5 + 0.5 * (1.0 - std::fabs(2.0 * zone_ratio - 1.0));
+    const double lat_norm = (lateral - corridor_half_width_) / std::max(side_extra_width_, 1e-6);
+    const double lat_gain = 1.0 - lat_norm;
+    const double gain = clamp01(long_gain) * clamp01(lat_gain);
+    const int cost = static_cast<int>(std::round(side_cost_ * gain));
+    return static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), cost));
+}
+
+unsigned char PredictedSweepRiskLayer::computeMiddleZoneCostAt(double wx, double wy,
+                                                               const SweepGeometry& geometry,
+                                                               const ZoneGeometry& zone) const
+{
+    const double outer_half_width = corridor_half_width_ + side_extra_width_;
+    const double dx = wx - zone.near_point.x;
+    const double dy = wy - zone.near_point.y;
+
+    const double longitudinal = dx * zone.dir.x + dy * zone.dir.y;
+    const double lateral = std::fabs(dx * geometry.normal.x + dy * geometry.normal.y);
+
+    if (longitudinal < 0.0 || longitudinal > zone.length || lateral > outer_half_width)
+        return costmap_2d::FREE_SPACE;
+
     if (lateral <= corridor_half_width_)
     {
-        const double long_gain = 1.0 - (longitudinal / std::max(zone.length, 1e-6));
+        const double long_ratio = longitudinal / std::max(zone.length, 1e-6);
+        const double long_gain = 0.7 + 0.3 * (1.0 - std::fabs(2.0 * long_ratio - 1.0));
         const double lat_gain  = 1.0 - (lateral / std::max(corridor_half_width_, 1e-6));
         const double gain = clamp01(long_gain) * (0.6 + 0.4 * clamp01(lat_gain));
         const int cost = static_cast<int>(std::round(sweep_cost_ * gain));
-        return static_cast<unsigned char>(std::min(252, cost));
+        return static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), cost));
     }
 
-    if (lateral <= corridor_half_width_ + side_extra_width_)
-    {
-        const double long_gain = 1.0 - (longitudinal / std::max(zone.length, 1e-6));
-        const double lat_norm = (lateral - corridor_half_width_) / std::max(side_extra_width_, 1e-6);
-        const double lat_gain = 1.0 - lat_norm;
-        const double gain = clamp01(long_gain) * clamp01(lat_gain);
-        const int cost = static_cast<int>(std::round(side_cost_ * gain));
-        return static_cast<unsigned char>(std::min(252, cost));
-    }
-
-    return costmap_2d::FREE_SPACE;
+    const double lat_norm = (lateral - corridor_half_width_) / std::max(side_extra_width_, 1e-6);
+    const double lat_gain = 1.0 - lat_norm;
+    const int cost = static_cast<int>(std::round(side_cost_ * clamp01(lat_gain)));
+    return static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), cost));
 }
 
 void PredictedSweepRiskLayer::updateBounds(double /*robot_x*/, double /*robot_y*/, double /*robot_yaw*/,
@@ -316,6 +549,96 @@ void PredictedSweepRiskLayer::updateBounds(double /*robot_x*/, double /*robot_y*
     *min_y = std::min(*min_y, front_far.y - pad);
     *max_x = std::max(*max_x, front_far.x + pad);
     *max_y = std::max(*max_y, front_far.y + pad);
+
+    if (has_path_ && !latest_path_.poses.empty())
+    {
+        const double path_pad = std::max(predicted_path_half_width_, obstacle_radius_) + 0.1;
+        Point2D prev = selectStartPoint();
+        double accumulated = 0.0;
+
+        for (const auto& pose_stamped : latest_path_.poses)
+        {
+            Point2D cur;
+            cur.x = pose_stamped.pose.position.x;
+            cur.y = pose_stamped.pose.position.y;
+
+            const double seg = distance2d(prev.x, prev.y, cur.x, cur.y);
+            if (seg < 1e-6)
+            {
+                prev = cur;
+                continue;
+            }
+
+            Point2D seg_end = cur;
+            if (accumulated + seg > max_path_length_)
+            {
+                const double remain = std::max(0.0, max_path_length_ - accumulated);
+                const double ratio = remain / seg;
+                seg_end.x = prev.x + ratio * (cur.x - prev.x);
+                seg_end.y = prev.y + ratio * (cur.y - prev.y);
+            }
+
+            *min_x = std::min(*min_x, std::min(prev.x, seg_end.x) - path_pad);
+            *min_y = std::min(*min_y, std::min(prev.y, seg_end.y) - path_pad);
+            *max_x = std::max(*max_x, std::max(prev.x, seg_end.x) + path_pad);
+            *max_y = std::max(*max_y, std::max(prev.y, seg_end.y) + path_pad);
+
+            accumulated += std::min(seg, std::max(0.0, max_path_length_ - (accumulated)));
+            if (accumulated >= max_path_length_)
+                break;
+
+            prev = cur;
+        }
+    }
+}
+
+unsigned char PredictedSweepRiskLayer::computePathTubeCostAt(double wx, double wy) const
+{
+    if (!has_path_ || latest_path_.poses.empty())
+        return costmap_2d::FREE_SPACE;
+
+    Point2D prev = selectStartPoint();
+    double accumulated = 0.0;
+    double best_distance = std::numeric_limits<double>::infinity();
+
+    for (const auto& pose_stamped : latest_path_.poses)
+    {
+        Point2D cur;
+        cur.x = pose_stamped.pose.position.x;
+        cur.y = pose_stamped.pose.position.y;
+
+        const double seg = distance2d(prev.x, prev.y, cur.x, cur.y);
+        if (seg < 1e-6)
+        {
+            prev = cur;
+            continue;
+        }
+
+        Point2D seg_end = cur;
+        double used_seg = seg;
+        if (accumulated + seg > max_path_length_)
+        {
+            const double remain = std::max(0.0, max_path_length_ - accumulated);
+            const double ratio = remain / seg;
+            seg_end.x = prev.x + ratio * (cur.x - prev.x);
+            seg_end.y = prev.y + ratio * (cur.y - prev.y);
+            used_seg = remain;
+        }
+
+        best_distance = std::min(best_distance,
+                                 pointToSegmentDistance(wx, wy, prev.x, prev.y, seg_end.x, seg_end.y));
+
+        accumulated += used_seg;
+        if (accumulated >= max_path_length_)
+            break;
+
+        prev = cur;
+    }
+
+    if (best_distance <= predicted_path_half_width_)
+        return static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), path_cost_));
+
+    return costmap_2d::FREE_SPACE;
 }
 
 unsigned char PredictedSweepRiskLayer::computeCostAt(double wx, double wy) const
@@ -326,11 +649,15 @@ unsigned char PredictedSweepRiskLayer::computeCostAt(double wx, double wy) const
 
     const double dist_to_start = distance2d(wx, wy, geometry.start.x, geometry.start.y);
     if (dist_to_start <= obstacle_radius_)
-        return static_cast<unsigned char>(std::min(252, body_cost_));
+        return static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), body_cost_));
 
-    const unsigned char rear_cost = computeZoneCostAt(wx, wy, geometry, computeRearZone(geometry));
-    const unsigned char front_cost = computeZoneCostAt(wx, wy, geometry, computeFrontZone(geometry));
-    return std::max(rear_cost, front_cost);
+    const ZoneGeometry rear_zone = computeRearZone(geometry);
+    const ZoneGeometry front_zone = computeFrontZone(geometry);
+    const ZoneGeometry middle_zone = computeUnsafeMiddleZone(geometry);
+
+    const unsigned char middle_cost = computeMiddleZoneCostAt(wx, wy, geometry, middle_zone);
+    const unsigned char path_cost = computePathTubeCostAt(wx, wy);
+    return std::max(path_cost, middle_cost);
 }
 
 void PredictedSweepRiskLayer::publishVisualization()
@@ -483,6 +810,8 @@ void PredictedSweepRiskLayer::updateCosts(costmap_2d::Costmap2D& master_grid,
                 master_grid.setCost(i, j, std::max(old_cost, risk_cost));
         }
     }
+
+    applyPathTubeCosts(master_grid);
 }
 
 }  // namespace mrvk_gazebo

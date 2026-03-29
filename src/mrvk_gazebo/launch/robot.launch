@@ -31,14 +31,16 @@
         <param name="scan_topic" value="$(arg laser_topic)"/>
         <param name="output_frame" value="odom"/>
 
-        <param name="prediction_time" value="2"/>
+        <param name="prediction_time" value="2.7"/>
         <param name="prediction_dt" value="0.1"/>
 
         <param name="alpha_gain" value="0.65"/>
         <param name="beta_gain" value="0.20"/>
         <param name="max_speed" value="2.0"/>
-        <param name="track_timeout" value="0.8"/>
-        <param name="lost_track_prediction_time" value="1.0"/>
+        <param name="track_timeout" value="1.2"/>
+        <param name="lost_track_prediction_time" value="1.6"/>
+        <param name="prediction_hold_time" value="0.8"/>
+        <param name="prediction_hold_speed_epsilon" value="0.08"/>
 
         <param name="point_spacing" value="0.05"/>
         <param name="corridor_radius" value="0.18"/>
@@ -67,12 +69,12 @@
         <param name="initial_expected_angle" value="0.0"/>
         <param name="initial_expected_range" value="2.5"/>
 
-        <param name="max_association_distance" value="1.5"/>
+        <param name="max_association_distance" value="2.0"/>
 
         <param name="publish_debug_segment" value="true"/>
     </node>
 
-    <node name="image_view" pkg="image_view" type="image_view" args="image:=/camera/image_raw"/>
+    <!-- <node name="image_view" pkg="image_view" type="image_view" args="image:=/camera/image_raw"/>-->
 
     <node name="slam_gmapping" pkg="gmapping" type="slam_gmapping">
         <rosparam command="load" file="$(find mrvk_gazebo)/config/slam/gmapping.yaml"/>

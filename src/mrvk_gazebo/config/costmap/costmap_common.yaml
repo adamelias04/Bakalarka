@@ -5,7 +5,7 @@ robot_radius: 0.50
 obstacles:
   enabled: true
   footprint_clearing_enabled: true
-  observation_sources: scan_marking scan_clearing predicted_obstacles
+  observation_sources: scan_marking scan_clearing
 
   scan_marking:
     data_type: LaserScan
@@ -27,17 +27,6 @@ obstacles:
     obstacle_range: 3.4
     raytrace_range: 7.0
 
-  predicted_obstacles:
-    data_type: PointCloud
-    topic: /predicted_obstacle_cloud
-    marking: true
-    clearing: false
-    min_obstacle_height: 0.0
-    max_obstacle_height: 2.0
-    obstacle_range: 5.0
-    raytrace_range: 5.5
-    expected_update_rate: 0.0
-
   observation_persistence: 0.0
   expected_update_rate: 0.0
 
@@ -51,19 +40,24 @@ predicted_sweep_risk_layer:
   corridor_half_width: 0.45
   side_extra_width: 0.30
   obstacle_radius: 0.22
-  max_path_length: 2.40
+  max_path_length: 3.24
   velocity_epsilon: 0.03
   pose_staleness_tolerance: 0.35
   pose_path_deviation_tolerance: 0.45
   visualization_z: 0.08
   visualization_height: 0.04
   visualization_clearance: 0.55
-  rear_zone_length_scale: 1.5
+  rear_zone_length_scale: 2.25
   front_zone_length_scale: 1.0
+  predicted_path_half_width: 0.32
+  low_speed_hold_time: 0.8
+  min_fallback_length: 1.0
+  geometry_hold_time: 1.0
 
-  sweep_cost: 220
-  side_cost: 150
-  body_cost: 252
+  sweep_cost: 254
+  side_cost: 254
+  body_cost: 254
+  path_cost: 254
 
   use_pose_as_start: true
   publish_visualization: true
@@ -71,8 +65,8 @@ predicted_sweep_risk_layer:
 
 inflation_layer:
   enabled: true
-  inflation_radius: 1.0
-  cost_scaling_factor: 4.0
+  inflation_radius: 1.2
+  cost_scaling_factor: 2.5
 
 obstacle_range: 3.4
 raytrace_range: 3.7

@@ -60,6 +60,8 @@ public:
         pnh.param<double>("max_speed", max_speed_, 2.0);
         pnh.param<double>("track_timeout", track_timeout_, 0.8);
         pnh.param<double>("lost_track_prediction_time", lost_track_prediction_time_, 1.0);
+        pnh.param<double>("prediction_hold_time", prediction_hold_time_, 0.8);
+        pnh.param<double>("prediction_hold_speed_epsilon", prediction_hold_speed_epsilon_, 0.08);
 
         pnh.param<double>("point_spacing", point_spacing_, 0.05);
         pnh.param<double>("corridor_radius", corridor_radius_, 0.18);
@@ -131,6 +133,8 @@ private:
     double max_speed_;
     double track_timeout_;
     double lost_track_prediction_time_;
+    double prediction_hold_time_;
+    double prediction_hold_speed_epsilon_;
 
     double point_spacing_;
     double corridor_radius_;
@@ -165,6 +169,10 @@ private:
     Point2D tracked_position_;
     double vx_;
     double vy_;
+    bool has_held_velocity_;
+    ros::Time held_velocity_stamp_;
+    double held_vx_;
+    double held_vy_;
 
     void resetTrack()
     {
@@ -174,6 +182,45 @@ private:
         tracked_position_.y = 0.0;
         vx_ = 0.0;
         vy_ = 0.0;
+        has_held_velocity_ = false;
+        held_velocity_stamp_ = ros::Time(0);
+        held_vx_ = 0.0;
+        held_vy_ = 0.0;
+    }
+
+    double speedNorm(double vx, double vy) const
+    {
+        return std::sqrt(vx * vx + vy * vy);
+    }
+
+    void refreshHeldVelocity(const ros::Time& stamp)
+    {
+        if (speedNorm(vx_, vy_) < prediction_hold_speed_epsilon_)
+            return;
+
+        held_vx_ = vx_;
+        held_vy_ = vy_;
+        held_velocity_stamp_ = stamp;
+        has_held_velocity_ = true;
+    }
+
+    void selectPredictionVelocity(const ros::Time& stamp, double& pred_vx, double& pred_vy) const
+    {
+        pred_vx = vx_;
+        pred_vy = vy_;
+
+        if (speedNorm(pred_vx, pred_vy) >= prediction_hold_speed_epsilon_)
+            return;
+
+        if (!has_held_velocity_ || held_velocity_stamp_.isZero())
+            return;
+
+        const double dt = std::fabs((stamp - held_velocity_stamp_).toSec());
+        if (dt > prediction_hold_time_)
+            return;
+
+        pred_vx = held_vx_;
+        pred_vy = held_vy_;
     }
 
     double clamp(double v, double lo, double hi) const
@@ -603,6 +650,10 @@ private:
         if (!has_track_)
             return;
 
+        double marker_vx = 0.0;
+        double marker_vy = 0.0;
+        selectPredictionVelocity(stamp, marker_vx, marker_vy);
+
         visualization_msgs::Marker marker;
         marker.header.stamp = stamp;
         marker.header.frame_id = output_frame_;
@@ -626,8 +677,8 @@ private:
         p0.y = origin.y;
         p0.z = z_height_;
 
-        p1.x = origin.x + 0.5 * vx_;
-        p1.y = origin.y + 0.5 * vy_;
+        p1.x = origin.x + 0.5 * marker_vx;
+        p1.y = origin.y + 0.5 * marker_vy;
         p1.z = z_height_;
 
         marker.points.push_back(p0);
@@ -645,6 +696,10 @@ private:
     {
         if (!has_track_)
             return;
+
+        double pred_vx = 0.0;
+        double pred_vy = 0.0;
+        selectPredictionVelocity(stamp, pred_vx, pred_vy);
 
         nav_msgs::Path path;
         path.header.stamp = stamp;
@@ -674,8 +729,8 @@ private:
 
         for (double t = 0.0; t <= horizon + 1e-6; t += prediction_dt_)
         {
-            const double px = origin.x + vx_ * t;
-            const double py = origin.y + vy_ * t;
+            const double px = origin.x + pred_vx * t;
+            const double py = origin.y + pred_vy * t;
             const double pz = z_height_;
 
             geometry_msgs::PoseStamped pose;
@@ -784,7 +839,7 @@ private:
         }
 
         const double dt = (stamp - last_track_stamp_).toSec();
-        const double allowed_missing_time = std::min(track_timeout_, lost_track_prediction_time_);
+        const double allowed_missing_time = std::max(track_timeout_, lost_track_prediction_time_);
 
         if (dt < 0.0 || dt > allowed_missing_time)
         {
@@ -798,8 +853,8 @@ private:
         predicted_origin.x = tracked_position_.x + vx_ * dt;
         predicted_origin.y = tracked_position_.y + vy_ * dt;
 
-        const double remaining_horizon = std::max(0.0, allowed_missing_time - dt);
-        if (remaining_horizon <= 1e-4)
+        const double continuation_horizon = std::max(prediction_dt_, prediction_time_);
+        if (continuation_horizon <= 1e-4)
         {
             resetTrack();
             clearPublishedPrediction(stamp);
@@ -807,7 +862,7 @@ private:
         }
 
         ROS_WARN_THROTTLE(1.0, "%s, using predicted continuation", reason.c_str());
-        publishPredictionFrom(predicted_origin, stamp, remaining_horizon);
+        publishPredictionFrom(predicted_origin, stamp, continuation_horizon);
     }
 
     void scanCallback(const sensor_msgs::LaserScan::ConstPtr& scan_msg)
@@ -864,6 +919,7 @@ private:
 
         updateTrack(measurement_world, dt);
         last_track_stamp_ = scan_msg->header.stamp;
+        refreshHeldVelocity(scan_msg->header.stamp);
 
         publishPrediction(scan_msg->header.stamp, prediction_time_);
     }

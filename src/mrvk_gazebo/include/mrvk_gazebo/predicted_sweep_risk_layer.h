@@ -53,15 +53,30 @@ private:
 
     bool hasUsableGeometry() const;
     bool hasFreshObservation() const;
+    bool canUseHeldMotion() const;
+    bool canUseCachedGeometry() const;
     Point2D selectStartPoint() const;
     bool buildSweepGeometry(SweepGeometry& geometry) const;
     Point2D offsetPoint(const Point2D& point, const Point2D& dir, double distance) const;
     ZoneGeometry computeRearZone(const SweepGeometry& geometry) const;
     ZoneGeometry computeFrontZone(const SweepGeometry& geometry) const;
     Point2D computeZoneCenter(const ZoneGeometry& zone) const;
+    ZoneGeometry computeUnsafeMiddleZone(const SweepGeometry& geometry) const;
+    void stampCircleCost(costmap_2d::Costmap2D& master_grid,
+                         double wx, double wy,
+                         double radius,
+                         unsigned char cost) const;
+    void applyPathTubeCosts(costmap_2d::Costmap2D& master_grid) const;
+    double pointToSegmentDistance(double px, double py,
+                                  double x0, double y0,
+                                  double x1, double y1) const;
+    unsigned char computePathTubeCostAt(double wx, double wy) const;
     unsigned char computeZoneCostAt(double wx, double wy,
                                     const SweepGeometry& geometry,
                                     const ZoneGeometry& zone) const;
+    unsigned char computeMiddleZoneCostAt(double wx, double wy,
+                                          const SweepGeometry& geometry,
+                                          const ZoneGeometry& zone) const;
     unsigned char computeCostAt(double wx, double wy) const;
     void publishVisualization();
     void clearVisualization();
@@ -82,6 +97,13 @@ private:
     bool has_path_;
     bool has_pose_;
     bool visualization_active_;
+    mutable bool has_cached_motion_;
+    mutable Point2D cached_motion_dir_;
+    mutable double cached_motion_length_;
+    mutable ros::Time cached_motion_stamp_;
+    mutable bool has_cached_geometry_;
+    mutable SweepGeometry cached_geometry_;
+    mutable ros::Time cached_geometry_stamp_;
 
     std::string path_topic_;
     std::string pose_topic_;
@@ -99,10 +121,15 @@ private:
     double visualization_clearance_;
     double rear_zone_length_scale_;
     double front_zone_length_scale_;
+    double predicted_path_half_width_;
+    double low_speed_hold_time_;
+    double min_fallback_length_;
+    double geometry_hold_time_;
 
     int sweep_cost_;
     int side_cost_;
     int body_cost_;
+    int path_cost_;
 
     bool use_pose_as_start_;
     bool publish_visualization_;

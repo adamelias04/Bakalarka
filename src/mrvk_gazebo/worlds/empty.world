@@ -17,7 +17,6 @@
       <pose>0 0 0.5 0 0 0</pose>
 
       <link name="link">
-
         <inertial>
           <mass>2.0</mass>
           <inertia>
@@ -49,7 +48,6 @@
             <diffuse>1 0 0 1</diffuse>
           </material>
         </visual>
-
       </link>
 
       <plugin name="oscillate_box_plugin" filename="liboscillate_box_plugin.so">
@@ -57,7 +55,6 @@
         <amplitude>3.0</amplitude>
         <frequency>0.05</frequency>
       </plugin>
-
     </model>
 
     <physics type="ode">
@@ -65,6 +62,21 @@
       <real_time_factor>1</real_time_factor>
       <real_time_update_rate>100</real_time_update_rate>
     </physics>
+
+    <gui fullscreen="0">
+      <plugin name="gazebo_goal_tool" filename="libgazebo_goal_tool.so">
+        <frame_id>odom</frame_id>
+        <ground_z>0.0</ground_z>
+        <x>18</x>
+        <y>462</y>
+      </plugin>
+      <plugin name="gazebo_nav_goal_gui" filename="libgazebo_nav_goal_gui.so">
+        <topic>/move_base_simple/goal</topic>
+        <default_frame>odom</default_frame>
+        <x>18</x>
+        <y>20</y>
+      </plugin>
+    </gui>
 
   </world>
 </sdf>
