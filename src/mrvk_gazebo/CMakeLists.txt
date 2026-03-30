@@ -41,11 +41,24 @@ add_executable(dynamic_obstacle_predictor
   src/dynamic_obstacle_predictor.cpp
 )
 
+add_executable(safe_zone_goal_router
+  src/safe_zone_goal_router.cpp
+)
+
 target_link_libraries(dynamic_obstacle_predictor
   ${catkin_LIBRARIES}
 )
 
+target_link_libraries(safe_zone_goal_router
+  ${catkin_LIBRARIES}
+)
+
 add_dependencies(dynamic_obstacle_predictor
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+
+add_dependencies(safe_zone_goal_router
   ${${PROJECT_NAME}_EXPORTED_TARGETS}
   ${catkin_EXPORTED_TARGETS}
 )
@@ -65,10 +78,16 @@ add_dependencies(predicted_sweep_risk_layer
 
 install(TARGETS
   dynamic_obstacle_predictor
+  safe_zone_goal_router
   predicted_sweep_risk_layer
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+catkin_install_python(PROGRAMS
+  scripts/safe_zone_goal_router.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 install(DIRECTORY include/${PROJECT_NAME}/

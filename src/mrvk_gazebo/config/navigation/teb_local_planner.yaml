@@ -21,11 +21,14 @@ TebLocalPlannerROS:
   yaw_goal_tolerance: 0.15
   free_goal_vel: false
 
+  # Via-points
+
   # Optimalizácia
   teb_autosize: true
   dt_ref: 0.4
   dt_hysteresis: 0.1
   weight_obstacle: 120.0
+  weight_viapoint: 0.0
   weight_kinematics_nh: 1000.0
   weight_kinematics_forward_drive: 1.0
   weight_optimaltime: 0.3

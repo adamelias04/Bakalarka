@@ -10,6 +10,7 @@ Panels:
         - /TF1/Frames1
         - /Path1
         - /Marker1
+        - /Marker2
       Splitter Ratio: 0.7660818696022034
     Tree Height: 1021
   - Class: rviz/Selection
@@ -600,6 +601,14 @@ Visualization Manager:
         predicted_sweep_safe_zone: true
       Queue Size: 100
       Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /predicted_sweep_via_points
+      Name: Marker
+      Namespaces:
+        predicted_sweep_via_points: true
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -628,7 +637,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/XYOrbit
-      Distance: 12.576597213745117
+      Distance: 17.878870010375977
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1

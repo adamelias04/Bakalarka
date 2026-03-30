@@ -8,6 +8,7 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace mrvk_gazebo
 {
@@ -62,6 +63,9 @@ private:
     ZoneGeometry computeFrontZone(const SweepGeometry& geometry) const;
     Point2D computeZoneCenter(const ZoneGeometry& zone) const;
     ZoneGeometry computeUnsafeMiddleZone(const SweepGeometry& geometry) const;
+    ZoneGeometry selectPreferredViaZone(const SweepGeometry& geometry) const;
+    void appendZoneViaPoints(const ZoneGeometry& zone, std::vector<Point2D>* points) const;
+    std::vector<Point2D> buildViaPoints(const SweepGeometry& geometry) const;
     void stampCircleCost(costmap_2d::Costmap2D& master_grid,
                          double wx, double wy,
                          double radius,
@@ -77,9 +81,13 @@ private:
     unsigned char computeMiddleZoneCostAt(double wx, double wy,
                                           const SweepGeometry& geometry,
                                           const ZoneGeometry& zone) const;
-    unsigned char computeCostAt(double wx, double wy) const;
+    unsigned char computeCostAt(double wx, double wy, const SweepGeometry* geometry = nullptr) const;
     void publishVisualization();
     void clearVisualization();
+    void publishViaPoints(const SweepGeometry& geometry);
+    void clearViaPoints();
+    void publishViaPointMarkers(const nav_msgs::Path& path);
+    void clearViaPointMarkers();
 
     double clamp01(double v) const;
     double norm2d(double x, double y) const;
@@ -90,6 +98,8 @@ private:
     ros::Subscriber path_sub_;
     ros::Subscriber pose_sub_;
     ros::Publisher marker_pub_;
+    ros::Publisher via_points_pub_;
+    ros::Publisher via_points_marker_pub_;
 
     nav_msgs::Path latest_path_;
     geometry_msgs::PoseStamped latest_pose_;
@@ -97,6 +107,8 @@ private:
     bool has_path_;
     bool has_pose_;
     bool visualization_active_;
+    bool via_points_active_;
+    bool via_points_marker_active_;
     mutable bool has_cached_motion_;
     mutable Point2D cached_motion_dir_;
     mutable double cached_motion_length_;
@@ -104,10 +116,17 @@ private:
     mutable bool has_cached_geometry_;
     mutable SweepGeometry cached_geometry_;
     mutable ros::Time cached_geometry_stamp_;
+    bool has_robot_pose_;
+    Point2D last_robot_pose_;
+    bool has_cached_via_points_;
+    nav_msgs::Path cached_via_points_;
+    ros::Time cached_via_points_stamp_;
 
     std::string path_topic_;
     std::string pose_topic_;
     std::string visualization_topic_;
+    std::string via_points_topic_;
+    std::string via_points_marker_topic_;
 
     double corridor_half_width_;
     double side_extra_width_;
@@ -125,14 +144,15 @@ private:
     double low_speed_hold_time_;
     double min_fallback_length_;
     double geometry_hold_time_;
+    double via_points_hold_time_;
 
     int sweep_cost_;
     int side_cost_;
     int body_cost_;
     int path_cost_;
-
     bool use_pose_as_start_;
     bool publish_visualization_;
+    bool publish_via_points_;
     bool require_fresh_observation_;
 };
 
