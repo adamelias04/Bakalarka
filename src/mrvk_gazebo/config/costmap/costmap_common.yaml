@@ -42,7 +42,7 @@ predicted_sweep_risk_layer:
   corridor_half_width: 0.45
   side_extra_width: 0.30
   obstacle_radius: 0.22
-  max_path_length: 3.24
+  max_path_length: 2.0
   velocity_epsilon: 0.03
   pose_staleness_tolerance: 0.35
   pose_path_deviation_tolerance: 0.45
@@ -55,16 +55,28 @@ predicted_sweep_risk_layer:
   low_speed_hold_time: 0.8
   min_fallback_length: 1.0
   geometry_hold_time: 1.0
-  via_points_hold_time: 0.6
+  via_points_hold_time: 3.0
+  via_point_reached_distance: 0.55
+  goal_reached_distance: 0.35
+  rear_via_point_distance: 0.35
+  # Kolko navyse (nad obstacle_radius) musi robot projekcne prejsť za
+  # stredom prekazky pozdlz jej osi pohybu, kym sa via-point pre danu
+  # tracking epizodu natrvalo zhasne. Prevencia wake-chasingu.
+  bypass_handoff_distance: 0.15
 
-  sweep_cost: 254
-  side_cost: 254
+  # Cost graduation: predikovana draha a telo prekazky su lethal
+  # (global planner sa im musi vyhnut), stredna a bocne zony su iba
+  # odpudive, aby TEB dokazal robota cez via-point pretlacit do safe zony.
+  sweep_cost: 180
+  side_cost: 110
   body_cost: 254
   path_cost: 254
 
   use_pose_as_start: true
+  apply_costs: true
+  prefer_rear_via_zone: true
   publish_visualization: true
-  publish_via_points: false
+  publish_via_points: true
   require_fresh_observation: true
 
 inflation_layer:

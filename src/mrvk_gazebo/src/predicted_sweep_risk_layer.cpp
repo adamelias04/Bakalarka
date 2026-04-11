@@ -20,12 +20,16 @@ PredictedSweepRiskLayer::PredictedSweepRiskLayer()
       cached_motion_length_(0.0),
       has_cached_geometry_(false),
       has_robot_pose_(false),
-      has_cached_via_points_(false)
+      has_cached_via_points_(false),
+      suppress_via_points_(false),
+      has_suppress_motion_dir_(false)
 {
     cached_motion_dir_.x = 1.0;
     cached_motion_dir_.y = 0.0;
     last_robot_pose_.x = 0.0;
     last_robot_pose_.y = 0.0;
+    suppress_motion_dir_.x = 1.0;
+    suppress_motion_dir_.y = 0.0;
 }
 
 void PredictedSweepRiskLayer::onInitialize()
@@ -57,7 +61,11 @@ void PredictedSweepRiskLayer::onInitialize()
     nh.param("low_speed_hold_time", low_speed_hold_time_, 0.8);
     nh.param("min_fallback_length", min_fallback_length_, 1.0);
     nh.param("geometry_hold_time", geometry_hold_time_, 1.0);
-    nh.param("via_points_hold_time", via_points_hold_time_, 0.6);
+    nh.param("via_points_hold_time", via_points_hold_time_, 3.0);
+    nh.param("via_point_reached_distance", via_point_reached_distance_, 0.30);
+    nh.param("goal_reached_distance", goal_reached_distance_, 0.35);
+    nh.param("rear_via_point_distance", rear_via_point_distance_, 0.35);
+    nh.param("bypass_handoff_distance", bypass_handoff_distance_, 0.15);
 
     nh.param("sweep_cost", sweep_cost_, 220);
     nh.param("side_cost", side_cost_, 150);
@@ -65,6 +73,8 @@ void PredictedSweepRiskLayer::onInitialize()
     nh.param("path_cost", path_cost_, 254);
 
     nh.param("use_pose_as_start", use_pose_as_start_, true);
+    nh.param("apply_costs", apply_costs_, true);
+    nh.param("prefer_rear_via_zone", prefer_rear_via_zone_, false);
     nh.param("publish_visualization", publish_visualization_, true);
     nh.param("publish_via_points", publish_via_points_, true);
     nh.param("require_fresh_observation", require_fresh_observation_, true);
@@ -80,6 +90,8 @@ void PredictedSweepRiskLayer::onInitialize()
 
 void PredictedSweepRiskLayer::reset()
 {
+    suppress_via_points_ = false;
+    has_suppress_motion_dir_ = false;
     clearVisualization();
     clearViaPoints();
     clearViaPointMarkers();
@@ -92,6 +104,14 @@ void PredictedSweepRiskLayer::pathCallback(const nav_msgs::Path::ConstPtr& msg)
     std::lock_guard<std::mutex> lock(mutex_);
     latest_path_ = *msg;
     has_path_ = !latest_path_.poses.empty();
+    if (!has_path_)
+    {
+        suppress_via_points_ = false;
+        has_suppress_motion_dir_ = false;
+        has_cached_via_points_ = false;
+        cached_via_points_.poses.clear();
+        cached_via_points_stamp_ = ros::Time();
+    }
     publishVisualization();
 }
 
@@ -470,6 +490,9 @@ PredictedSweepRiskLayer::ZoneGeometry PredictedSweepRiskLayer::selectPreferredVi
     const ZoneGeometry rear_zone = computeRearZone(geometry);
     const ZoneGeometry front_zone = computeFrontZone(geometry);
 
+    if (prefer_rear_via_zone_)
+        return rear_zone;
+
     if (!has_robot_pose_)
         return rear_zone;
 
@@ -486,26 +509,18 @@ void PredictedSweepRiskLayer::appendZoneViaPoints(const ZoneGeometry& zone,
     if (points == nullptr)
         return;
 
-    const double safe_margin = std::min(std::max(0.15 * zone.length, 0.10), 0.35);
-    const double usable_length = std::max(zone.length - 2.0 * safe_margin, 1e-3);
-    static const double ratios[] = {0.15, 0.50, 0.85};
-
-    for (double ratio : ratios)
-    {
-        points->push_back(offsetPoint(zone.near_point, zone.dir, safe_margin + ratio * usable_length));
-    }
+    const double target_distance = std::min(std::max(rear_via_point_distance_, 0.05),
+                                            std::max(zone.length - 0.05, 0.05));
+    points->push_back(offsetPoint(zone.near_point, zone.dir, target_distance));
 }
 
 std::vector<PredictedSweepRiskLayer::Point2D> PredictedSweepRiskLayer::buildViaPoints(const SweepGeometry& geometry) const
 {
     std::vector<Point2D> points;
-    points.reserve(6);
+    points.reserve(2);
 
     const ZoneGeometry rear_zone = computeRearZone(geometry);
-    const ZoneGeometry front_zone = computeFrontZone(geometry);
-
     appendZoneViaPoints(rear_zone, &points);
-    appendZoneViaPoints(front_zone, &points);
 
     return points;
 }
@@ -852,7 +867,8 @@ void PredictedSweepRiskLayer::publishViaPoints(const SweepGeometry& geometry)
     if (!publish_via_points_ || !via_points_pub_)
         return;
 
-    const ros::Time stamp = !latest_path_.header.stamp.isZero() ? latest_path_.header.stamp : ros::Time::now();
+    const ros::Time now = ros::Time::now();
+    const ros::Time stamp = !latest_path_.header.stamp.isZero() ? latest_path_.header.stamp : now;
     const std::string frame_id = !latest_path_.header.frame_id.empty()
         ? latest_path_.header.frame_id
         : layered_costmap_->getGlobalFrameID();
@@ -876,33 +892,195 @@ void PredictedSweepRiskLayer::publishViaPoints(const SweepGeometry& geometry)
         return path;
     };
 
+    auto publishClearedViaPoints = [&]()
+    {
+        cached_via_points_ = buildPathFromPoints({});
+        cached_via_points_stamp_ = now;
+        has_cached_via_points_ = false;
+        via_points_pub_.publish(cached_via_points_);
+        publishViaPointMarkers(cached_via_points_);
+        via_points_active_ = false;
+    };
+
+    if (!has_path_ || latest_path_.poses.empty())
+    {
+        suppress_via_points_ = false;
+        has_suppress_motion_dir_ = false;
+        publishClearedViaPoints();
+        return;
+    }
+
+    if (isMainGoalReached())
+    {
+        suppress_via_points_ = false;
+        has_suppress_motion_dir_ = false;
+        publishClearedViaPoints();
+        return;
+    }
+
+    // Direction-flip reset: ked sa os pohybu prekazky otocila o viac ako
+    // 90 stupnov oproti smeru, pri ktorom sme sticky flag nastavili, notion
+    // "za prekazkou" sa prevratil. Sticky z predosleho smeru uz nie je
+    // platny (typicky oscilujuca prekazka). Zhasneme flag, nech sa dole
+    // re-evaluate na aktualnej geometrii.
+    if (suppress_via_points_ && has_suppress_motion_dir_)
+    {
+        const double dot = geometry.dir.x * suppress_motion_dir_.x
+                         + geometry.dir.y * suppress_motion_dir_.y;
+        if (dot < 0.0)
+        {
+            suppress_via_points_ = false;
+            has_suppress_motion_dir_ = false;
+        }
+    }
+
+    // Primarny terminator wake-chasingu: ked robot projekcne prejde za
+    // rovinu prekazky (rearProgress >= obstacle_radius + handoff margin),
+    // via-point uz pre tuto epizodu nic nerieši — zhasneme ho natrvalo.
+    // Sticky flag sa zresetuje pri: skonceni trackingu (prazdna path),
+    // dosahnuti hlavneho cielu, alebo ked sa motion direction otoci >90°.
+    if (hasRobotBypassedObstacle(geometry))
+    {
+        suppress_via_points_ = true;
+        suppress_motion_dir_ = geometry.dir;
+        has_suppress_motion_dir_ = true;
+        publishClearedViaPoints();
+        return;
+    }
+
     if (has_cached_via_points_ && !cached_via_points_stamp_.isZero())
     {
-        const double dt = std::fabs((stamp - cached_via_points_stamp_).toSec());
+        if (!cached_via_points_.poses.empty())
+        {
+            const auto& pose = cached_via_points_.poses.front().pose.position;
+            const Point2D cached_via_point{pose.x, pose.y};
+            if (isGoalCloserThanViaPoint(cached_via_point))
+            {
+                publishClearedViaPoints();
+                return;
+            }
+
+            if (isViaPointReached(cached_via_point))
+            {
+                suppress_via_points_ = true;
+                suppress_motion_dir_ = geometry.dir;
+                has_suppress_motion_dir_ = true;
+                publishClearedViaPoints();
+                return;
+            }
+        }
+
+        const double dt = std::fabs((now - cached_via_points_stamp_).toSec());
         if (dt < via_points_hold_time_)
         {
             nav_msgs::Path held = cached_via_points_;
             held.header.stamp = stamp;
+            for (auto& pose : held.poses)
+                pose.header = held.header;
             via_points_pub_.publish(held);
-            publishViaPointMarkers(buildPathFromPoints(buildViaPoints(geometry)));
+            publishViaPointMarkers(held);
             via_points_active_ = !held.poses.empty();
             return;
         }
     }
 
     std::vector<Point2D> planner_points;
-    planner_points.reserve(3);
+    planner_points.reserve(1);
+
+    if (suppress_via_points_)
+    {
+        publishClearedViaPoints();
+        return;
+    }
+
     appendZoneViaPoints(selectPreferredViaZone(geometry), &planner_points);
+
+    if (has_robot_pose_ && !planner_points.empty())
+    {
+        const Point2D& target = planner_points.front();
+        if (isGoalCloserThanViaPoint(target))
+        {
+            publishClearedViaPoints();
+            return;
+        }
+    }
+
+    if (!planner_points.empty())
+    {
+        const Point2D& target = planner_points.front();
+        if (isViaPointReached(target))
+        {
+            suppress_via_points_ = true;
+            suppress_motion_dir_ = geometry.dir;
+            has_suppress_motion_dir_ = true;
+            publishClearedViaPoints();
+            return;
+        }
+    }
+
+    if (planner_points.empty())
+    {
+        publishClearedViaPoints();
+        return;
+    }
 
     const nav_msgs::Path path = buildPathFromPoints(planner_points);
     const nav_msgs::Path marker_path = buildPathFromPoints(buildViaPoints(geometry));
 
     cached_via_points_ = path;
-    cached_via_points_stamp_ = stamp;
+    cached_via_points_stamp_ = now;
     has_cached_via_points_ = true;
     via_points_pub_.publish(path);
     publishViaPointMarkers(marker_path);
     via_points_active_ = !path.poses.empty();
+}
+
+bool PredictedSweepRiskLayer::isMainGoalReached() const
+{
+    if (!has_robot_pose_ || !has_path_ || latest_path_.poses.empty())
+        return false;
+
+    const auto& goal_pose = latest_path_.poses.back().pose.position;
+    const double goal_dist = distance2d(last_robot_pose_.x, last_robot_pose_.y, goal_pose.x, goal_pose.y);
+    return goal_dist <= goal_reached_distance_;
+}
+
+bool PredictedSweepRiskLayer::isViaPointReached(const Point2D& via_point) const
+{
+    if (!has_robot_pose_)
+        return false;
+
+    const double via_dist = distance2d(last_robot_pose_.x, last_robot_pose_.y, via_point.x, via_point.y);
+    return via_dist <= via_point_reached_distance_;
+}
+
+double PredictedSweepRiskLayer::rearProgress(const SweepGeometry& geometry) const
+{
+    if (!has_robot_pose_)
+        return -std::numeric_limits<double>::infinity();
+
+    const double dx = last_robot_pose_.x - geometry.start.x;
+    const double dy = last_robot_pose_.y - geometry.start.y;
+    return dx * (-geometry.dir.x) + dy * (-geometry.dir.y);
+}
+
+bool PredictedSweepRiskLayer::hasRobotBypassedObstacle(const SweepGeometry& geometry) const
+{
+    if (!has_robot_pose_)
+        return false;
+
+    return rearProgress(geometry) >= (obstacle_radius_ + bypass_handoff_distance_);
+}
+
+bool PredictedSweepRiskLayer::isGoalCloserThanViaPoint(const Point2D& via_point) const
+{
+    if (!has_robot_pose_ || !has_path_ || latest_path_.poses.empty())
+        return false;
+
+    const auto& goal_pose = latest_path_.poses.back().pose.position;
+    const double goal_dist = distance2d(last_robot_pose_.x, last_robot_pose_.y, goal_pose.x, goal_pose.y);
+    const double via_dist = distance2d(last_robot_pose_.x, last_robot_pose_.y, via_point.x, via_point.y);
+    return goal_dist < via_dist;
 }
 
 void PredictedSweepRiskLayer::clearViaPoints()
@@ -1008,6 +1186,15 @@ void PredictedSweepRiskLayer::updateCosts(costmap_2d::Costmap2D& master_grid,
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    if (isMainGoalReached())
+    {
+        suppress_via_points_ = false;
+        has_suppress_motion_dir_ = false;
+        has_cached_via_points_ = false;
+        cached_via_points_.poses.clear();
+        cached_via_points_stamp_ = ros::Time();
+    }
+
     if (!enabled_ || !hasUsableGeometry())
     {
         clearVisualization();
@@ -1027,6 +1214,9 @@ void PredictedSweepRiskLayer::updateCosts(costmap_2d::Costmap2D& master_grid,
 
     publishVisualization();
     publishViaPoints(geometry);
+
+    if (!apply_costs_)
+        return;
 
     for (int j = min_j; j < max_j; ++j)
     {

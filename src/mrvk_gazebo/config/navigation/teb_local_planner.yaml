@@ -3,32 +3,40 @@ TebLocalPlannerROS:
   map_frame: odom
 
   # Robot (diff drive)
-  max_vel_x: 1.8
-  max_vel_x_backwards: 0.4
-  max_vel_theta: 0.7
-  acc_lim_x: 1.5
-  acc_lim_theta: 1.8
+  max_vel_x: 2
+  max_vel_x_backwards: 0.8
+  max_vel_theta: 1.2
+  acc_lim_x: 3.0
+  acc_lim_theta: 2.8
 
   # Footprint / safety
   footprint_model:
     type: "circular"
     radius: 0.50
-  min_obstacle_dist: 0.45
-  inflation_dist: 0.80
+  min_obstacle_dist: 0.35
+  inflation_dist: 0.60
 
   # Goal tolerancie
-  xy_goal_tolerance: 0.15
-  yaw_goal_tolerance: 0.15
-  free_goal_vel: false
+  xy_goal_tolerance: 0.35
+  yaw_goal_tolerance: 0.50
+  free_goal_vel: true
 
   # Via-points
+  # Neusporiadane: via-pointy z PredictedSweepRiskLayer su soft atraktory
+  # do safe zony, nemusia byt prechadzane v poradi ani striktne dosiahnute.
+  via_points_ordered: false
+  global_plan_viapoint_sep: -1.0  # nevyrabaj vlastne via-pointy z global planu
 
   # Optimalizácia
   teb_autosize: true
-  dt_ref: 0.4
+  dt_ref: 0.3
   dt_hysteresis: 0.1
-  weight_obstacle: 120.0
-  weight_viapoint: 0.0
+  weight_obstacle: 80.0
+  # Primarny terminator wake-chasingu je teraz geometricky
+  # (bypass_handoff_distance v PredictedSweepRiskLayer), takze
+  # weight_viapoint nemusi byt natiahnuty nahor — stredne silny atraktor
+  # staci na pritiahnutie do safe zony a po presle sa sam zhasne.
+  weight_viapoint: 20
   weight_kinematics_nh: 1000.0
   weight_kinematics_forward_drive: 1.0
-  weight_optimaltime: 0.3
+  weight_optimaltime: 0.8

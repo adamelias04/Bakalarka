@@ -88,6 +88,11 @@ private:
     void clearViaPoints();
     void publishViaPointMarkers(const nav_msgs::Path& path);
     void clearViaPointMarkers();
+    bool isMainGoalReached() const;
+    bool isViaPointReached(const Point2D& via_point) const;
+    bool isGoalCloserThanViaPoint(const Point2D& via_point) const;
+    double rearProgress(const SweepGeometry& geometry) const;
+    bool hasRobotBypassedObstacle(const SweepGeometry& geometry) const;
 
     double clamp01(double v) const;
     double norm2d(double x, double y) const;
@@ -121,6 +126,9 @@ private:
     bool has_cached_via_points_;
     nav_msgs::Path cached_via_points_;
     ros::Time cached_via_points_stamp_;
+    bool suppress_via_points_;
+    bool has_suppress_motion_dir_;
+    Point2D suppress_motion_dir_;
 
     std::string path_topic_;
     std::string pose_topic_;
@@ -145,12 +153,18 @@ private:
     double min_fallback_length_;
     double geometry_hold_time_;
     double via_points_hold_time_;
+    double via_point_reached_distance_;
+    double goal_reached_distance_;
+    double rear_via_point_distance_;
+    double bypass_handoff_distance_;
 
     int sweep_cost_;
     int side_cost_;
     int body_cost_;
     int path_cost_;
     bool use_pose_as_start_;
+    bool apply_costs_;
+    bool prefer_rear_via_zone_;
     bool publish_visualization_;
     bool publish_via_points_;
     bool require_fresh_observation_;

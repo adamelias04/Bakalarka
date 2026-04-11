@@ -85,38 +85,9 @@
           type="safe_zone_goal_router"
           name="safe_zone_goal_router"
           output="screen">
-        <param name="input_goal_topic" value="/move_base_simple/goal"/>
-        <param name="output_goal_topic" value="/managed_move_base_simple/goal"/>
-        <param name="path_topic" value="/predicted_obstacle_path"/>
-        <param name="pose_topic" value="/detected_obstacle_pose"/>
         <param name="odom_topic" value="$(arg odom_topic)"/>
         <param name="local_costmap_topic" value="/move_base/local_costmap/costmap"/>
         <param name="output_frame" value="odom"/>
-
-        <param name="use_pose_as_start" value="true"/>
-        <param name="pose_staleness_tolerance" value="0.35"/>
-        <param name="pose_path_deviation_tolerance" value="0.45"/>
-        <param name="velocity_epsilon" value="0.03"/>
-        <param name="max_path_length" value="3.24"/>
-
-        <param name="obstacle_radius" value="0.22"/>
-        <param name="corridor_half_width" value="0.45"/>
-        <param name="side_extra_width" value="0.30"/>
-        <param name="visualization_clearance" value="0.55"/>
-        <param name="rear_zone_length_scale" value="2.25"/>
-        <param name="front_zone_length_scale" value="1.0"/>
-        <param name="robot_radius" value="0.50"/>
-        <param name="hazard_margin" value="0.20"/>
-        <param name="rear_zone_preference" value="4"/>
-        <param name="front_zone_penalty" value="2"/>
-        <param name="rear_extra_distance_tolerance" value="3.0"/>
-
-        <param name="subgoal_reached_distance" value="0.30"/>
-        <param name="goal_reached_distance" value="0.25"/>
-        <param name="costmap_block_threshold" value="85"/>
-        <param name="costmap_check_step" value="0.08"/>
-        <param name="timer_rate" value="10.0"/>
-        <param name="publish_debug_marker" value="true"/>
     </node>
 
     <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
