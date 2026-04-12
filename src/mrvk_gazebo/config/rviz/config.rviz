@@ -603,10 +603,10 @@ Visualization Manager:
       Value: true
     - Class: rviz/Marker
       Enabled: true
-      Marker Topic: /predicted_sweep_via_points
+      Marker Topic: /robot_motion_prediction_marker
       Name: Marker
       Namespaces:
-        predicted_sweep_via_points: true
+        {}
       Queue Size: 100
       Value: true
   Enabled: true

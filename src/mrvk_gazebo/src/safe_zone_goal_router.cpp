@@ -36,8 +36,21 @@ struct Point2D
 // Preto tento router UZ neprepina goal na "rear_deep" subgoal. Jediny
 // aktivny zasah, ktory router este robi, je tvrdy escape, ked sa robot
 // ocitne priamo v high-cost / lethal oblasti lokalnej costmapy (napr.
-// ho nieco zatlaci dnu). V bezneho stave iba transparentne posiela
-// final goal dalej, aby move_base a via-points mohli odviest svoju robotu.
+// ho nieco zatlaci dnu).
+//
+// Escape policy:
+//   - Pozrieme sa, ako daleko siaha lethal pas pozdlz osi robota dopredu
+//     a dozadu (`measureAxisClearance` skenuje costmapu krok po kroku).
+//   - Default je IST DOPREDU. Robot sa vyberie dozadu iba ked je dozadu
+//     pas vyrazne kratsi nez dopredu (rozdiel >= forward_bias_distance_).
+//     Priklad pri default 0.5 m bias: 30 cm vpredu vs 10 cm vzadu -> ide
+//     dopredu (rozdiel 0.20 < 0.5). 1.0 m vpredu vs 10 cm vzadu -> ide
+//     dozadu (rozdiel 0.90 >= 0.5).
+//   - Subgoal ulozime v aktualnej orientacii robota (yaw), aby TEB
+//     nemusel rotovat v cell s lethal cost; pri spatnom escape robot
+//     reverzuje.
+// V bezneho stave iba transparentne posiela final goal dalej, aby
+// move_base a via-points mohli odviest svoju robotu.
 class SafeZoneGoalRouter
 {
 public:
@@ -60,11 +73,11 @@ public:
     private_nh_.param("subgoal_reached_distance", subgoal_reached_distance_, 0.25);
     private_nh_.param("goal_reached_distance", goal_reached_distance_, 0.35);
     private_nh_.param("costmap_block_threshold", costmap_block_threshold_, 85);
-    private_nh_.param("escape_cost_threshold", escape_cost_threshold_,
-                      std::max(0, costmap_block_threshold_ - 1));
     private_nh_.param("costmap_check_step", costmap_check_step_, 0.08);
-    private_nh_.param("escape_search_radius", escape_search_radius_, 2.0);
-    private_nh_.param("escape_min_distance", escape_min_distance_, 0.20);
+    private_nh_.param("forward_escape_distance", forward_escape_distance_, 1.0);
+    private_nh_.param("escape_axis_step", escape_axis_step_, 0.05);
+    private_nh_.param("escape_axis_max_distance", escape_axis_max_distance_, 1.5);
+    private_nh_.param("forward_bias_distance", forward_bias_distance_, 0.5);
     private_nh_.param("timer_rate", timer_rate_, 10.0);
     private_nh_.param("publish_debug_marker", publish_debug_marker_, true);
 
@@ -181,43 +194,6 @@ private:
     return true;
   }
 
-  bool costmapValueAtCell(int mx, int my, int* value) const
-  {
-    if (!has_latest_costmap_ || value == nullptr)
-      return false;
-
-    if (mx < 0 || my < 0 ||
-        mx >= static_cast<int>(latest_costmap_.info.width) ||
-        my >= static_cast<int>(latest_costmap_.info.height))
-      return false;
-
-    const int index = my * static_cast<int>(latest_costmap_.info.width) + mx;
-    if (index < 0 || index >= static_cast<int>(latest_costmap_.data.size()))
-      return false;
-
-    *value = static_cast<int>(latest_costmap_.data[static_cast<std::size_t>(index)]);
-    return true;
-  }
-
-  Point2D costmapCellCenter(int mx, int my) const
-  {
-    const auto& info = latest_costmap_.info;
-    const auto& origin = info.origin.position;
-    return Point2D{
-      origin.x + (static_cast<double>(mx) + 0.5) * info.resolution,
-      origin.y + (static_cast<double>(my) + 0.5) * info.resolution
-    };
-  }
-
-  bool isEscapeCellFree(int mx, int my) const
-  {
-    int value = 0;
-    if (!costmapValueAtCell(mx, my, &value))
-      return false;
-
-    return value >= 0 && value < escape_cost_threshold_;
-  }
-
   bool lineBlockedInCostmap(const Point2D& start, const Point2D& end) const
   {
     if (!has_latest_costmap_)
@@ -242,67 +218,75 @@ private:
     return false;
   }
 
-  bool findNearestEscapePoint(const Point2D& robot_xy,
-                              const Point2D& goal_xy,
-                              Point2D* escape_xy) const
+  // Skenuje costmapu pozdlz lubovolnej osi (dx, dy) a vrati vzdialenost,
+  // pri ktorej hodnota klesne pod lethal threshold. Ak nikdy neopustime
+  // lethal pas v ramci escape_axis_max_distance_, vraciame plne max
+  // (worst-case clearance). Vystup z mriezky lokalnej costmapy beriem
+  // ako "uz mimo zname cierne pole" a teda escape je dosiahnuty.
+  double measureAxisClearance(const Point2D& start, double dir_x, double dir_y) const
   {
-    if (escape_xy == nullptr || !has_latest_costmap_)
-      return false;
+    if (!has_latest_costmap_)
+      return escape_axis_max_distance_;
 
-    int robot_mx = 0;
-    int robot_my = 0;
-    if (!worldToCostmap(robot_xy, &robot_mx, &robot_my))
-      return false;
-
-    const double resolution = std::max(static_cast<double>(latest_costmap_.info.resolution), 1e-3);
-    const int min_radius_cells =
-      std::max(1, static_cast<int>(std::ceil(escape_min_distance_ / resolution)));
-    const int max_radius_cells =
-      std::max(min_radius_cells, static_cast<int>(std::ceil(escape_search_radius_ / resolution)));
-
-    for (int radius = min_radius_cells; radius <= max_radius_cells; ++radius)
+    const double step = std::max(escape_axis_step_, 1e-3);
+    const int max_steps = std::max(1, static_cast<int>(std::ceil(escape_axis_max_distance_ / step)));
+    for (int i = 1; i <= max_steps; ++i)
     {
-      bool found = false;
-      double best_score = std::numeric_limits<double>::infinity();
-      Point2D best_xy{0.0, 0.0};
-
-      for (int dy = -radius; dy <= radius; ++dy)
-      {
-        for (int dx = -radius; dx <= radius; ++dx)
-        {
-          if (std::max(std::abs(dx), std::abs(dy)) != radius)
-            continue;
-
-          const int mx = robot_mx + dx;
-          const int my = robot_my + dy;
-          if (!isEscapeCellFree(mx, my))
-            continue;
-
-          const Point2D candidate_xy = costmapCellCenter(mx, my);
-          const double robot_distance = distance2d(robot_xy, candidate_xy);
-          if (robot_distance < escape_min_distance_)
-            continue;
-
-          const bool final_path_clear = !lineBlockedInCostmap(candidate_xy, goal_xy);
-          const double goal_distance = distance2d(candidate_xy, goal_xy);
-          const double score = goal_distance + 0.15 * robot_distance - (final_path_clear ? 0.5 : 0.0);
-          if (score < best_score)
-          {
-            best_score = score;
-            best_xy = candidate_xy;
-            found = true;
-          }
-        }
-      }
-
-      if (found)
-      {
-        *escape_xy = best_xy;
-        return true;
-      }
+      const double dist = static_cast<double>(i) * step;
+      const Point2D probe{start.x + dir_x * dist, start.y + dir_y * dist};
+      int value = 0;
+      if (!costmapValueAt(probe, &value))
+        return dist;
+      if (value < costmap_block_threshold_)
+        return dist;
     }
+    return escape_axis_max_distance_;
+  }
 
-    return false;
+  // Vybera escape subgoal na zaklade axialneho clearance. Forward bias:
+  // dopredu defaultne; dozadu len ked je tam o forward_bias_distance_ m
+  // kratsi pas lethal cost. Subgoal je umiestneny tak, aby presiahol
+  // koniec lethal pasu (clear + 0.30 m), s minimom forward_escape_distance_,
+  // a orientacia subgoalu zostava aktualny yaw robota.
+  struct EscapeChoice
+  {
+    Point2D xy;
+    double yaw;
+    bool go_backward;
+    double forward_clear;
+    double backward_clear;
+  };
+
+  EscapeChoice chooseEscape(const geometry_msgs::PoseStamped& pose) const
+  {
+    tf2::Quaternion q;
+    tf2::fromMsg(pose.pose.orientation, q);
+    double roll = 0.0;
+    double pitch = 0.0;
+    double yaw = 0.0;
+    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+
+    const double cy = std::cos(yaw);
+    const double sy = std::sin(yaw);
+    const Point2D start{pose.pose.position.x, pose.pose.position.y};
+
+    const double fwd = measureAxisClearance(start, cy, sy);
+    const double bwd = measureAxisClearance(start, -cy, -sy);
+
+    // Strict <: pri remize prefer forward.
+    const bool back = (bwd + forward_bias_distance_) < fwd;
+    const double dx = back ? -cy : cy;
+    const double dy = back ? -sy : sy;
+    const double clear = back ? bwd : fwd;
+    const double drive = std::max(forward_escape_distance_, clear + 0.30);
+
+    EscapeChoice out;
+    out.xy = Point2D{start.x + dx * drive, start.y + dy * drive};
+    out.yaw = yaw;
+    out.go_backward = back;
+    out.forward_clear = fwd;
+    out.backward_clear = bwd;
+    return out;
   }
 
   geometry_msgs::PoseStamped makePose(const Point2D& xy,
@@ -439,23 +423,23 @@ private:
       return;
     }
 
-    // Robot uviazol v lethal/high-cost cele: skus vytiahnut escape subgoal.
+    // Robot uviazol v lethal/high-cost cele: vyber smer (forward s biasom,
+    // backward len pri vyrazne kratsom pase) a vystup z pasu pozdlz
+    // tej osi. Subgoal drzi current yaw -> pri spatnom escape robot
+    // reverzuje bez rotacie.
     if (robot_in_blocked_cost)
     {
-      Point2D escape_xy;
-      if (findNearestEscapePoint(robot_xy, goal_xy, &escape_xy))
-      {
-        const double heading = std::atan2(goal_xy.y - escape_xy.y, goal_xy.x - escape_xy.x);
-        locked_subgoal_ = makePose(escape_xy, final_goal_, heading, true);
-        has_locked_subgoal_ = true;
-        ROS_INFO("SafeZoneGoalRouter: robot je v high-cost oblasti (%d), publikujem escape subgoal", robot_cost);
+      const EscapeChoice choice = chooseEscape(latest_robot_pose_);
+      locked_subgoal_ = makePose(choice.xy, final_goal_, choice.yaw, true);
+      has_locked_subgoal_ = true;
+      ROS_INFO("SafeZoneGoalRouter: high-cost (%d) -> %s escape (fwd_clear=%.2f bwd_clear=%.2f)",
+               robot_cost,
+               choice.go_backward ? "BACKWARD" : "FORWARD",
+               choice.forward_clear, choice.backward_clear);
 
-        if (force_publish || !has_active_target_ || active_mode_ != "escape" || poseChanged(active_target_, locked_subgoal_))
-          publishTarget(locked_subgoal_, "escape");
-        return;
-      }
-
-      ROS_WARN_THROTTLE(1.0, "SafeZoneGoalRouter: robot je v high-cost oblasti, ale nenasiel sa escape subgoal");
+      if (force_publish || !has_active_target_ || active_mode_ != "escape" || poseChanged(active_target_, locked_subgoal_))
+        publishTarget(locked_subgoal_, "escape");
+      return;
     }
 
     // Default: transparentny passthrough. Obchadzanie dynamickej prekazky
@@ -498,12 +482,13 @@ private:
   double subgoal_reached_distance_;
   double goal_reached_distance_;
   double costmap_check_step_;
-  double escape_search_radius_;
-  double escape_min_distance_;
+  double forward_escape_distance_;
+  double escape_axis_step_;
+  double escape_axis_max_distance_;
+  double forward_bias_distance_;
   double timer_rate_;
 
   int costmap_block_threshold_;
-  int escape_cost_threshold_;
 
   nav_msgs::OccupancyGrid latest_costmap_;
   geometry_msgs::PoseStamped latest_robot_pose_;

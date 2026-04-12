@@ -3,9 +3,9 @@ TebLocalPlannerROS:
   map_frame: odom
 
   # Robot (diff drive)
-  max_vel_x: 2
+  max_vel_x: 1
   max_vel_x_backwards: 0.8
-  max_vel_theta: 1.2
+  max_vel_theta: 1
   acc_lim_x: 3.0
   acc_lim_theta: 2.8
 

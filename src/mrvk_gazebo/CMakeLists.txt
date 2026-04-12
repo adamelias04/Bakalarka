@@ -45,11 +45,19 @@ add_executable(safe_zone_goal_router
   src/safe_zone_goal_router.cpp
 )
 
+add_executable(robot_motion_predictor
+  src/robot_motion_predictor.cpp
+)
+
 target_link_libraries(dynamic_obstacle_predictor
   ${catkin_LIBRARIES}
 )
 
 target_link_libraries(safe_zone_goal_router
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(robot_motion_predictor
   ${catkin_LIBRARIES}
 )
 
@@ -59,6 +67,11 @@ add_dependencies(dynamic_obstacle_predictor
 )
 
 add_dependencies(safe_zone_goal_router
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+
+add_dependencies(robot_motion_predictor
   ${${PROJECT_NAME}_EXPORTED_TARGETS}
   ${catkin_EXPORTED_TARGETS}
 )
@@ -79,6 +92,7 @@ add_dependencies(predicted_sweep_risk_layer
 install(TARGETS
   dynamic_obstacle_predictor
   safe_zone_goal_router
+  robot_motion_predictor
   predicted_sweep_risk_layer
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}

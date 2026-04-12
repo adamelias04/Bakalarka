@@ -81,7 +81,7 @@ predicted_sweep_risk_layer:
 
 inflation_layer:
   enabled: true
-  inflation_radius: 1.2
+  inflation_radius: 0.2
   cost_scaling_factor: 2.5
 
 obstacle_range: 3.4
