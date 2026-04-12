@@ -70,7 +70,7 @@ predicted_sweep_risk_layer:
   sweep_cost: 180
   side_cost: 110
   body_cost: 254
-  path_cost: 254
+  path_cost: 180
 
   use_pose_as_start: true
   apply_costs: true
