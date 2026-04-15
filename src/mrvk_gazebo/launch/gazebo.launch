@@ -15,11 +15,18 @@
     <include file="$(find gazebo_ros)/launch/empty_world.launch">
         <arg name="paused" value="$(arg paused)"/>
         <arg name="use_sim_time" value="$(arg use_sim_time)"/>
-        <arg name="gui" value="$(arg gui)" />
+        <arg name="gui" value="false"/>
         <arg name="headless" value="$(arg headless)"/>
         <arg name="verbose" value="$(arg verbose)"/>
         <arg name="world_name" value="$(arg world_file)"/>
     </include>
+
+    <!-- Vlastny gzclient s nav goal GUI pluginmi — nacitaju sa pre
+         kazdy svet, nie len pre empty.world. -->
+    <group if="$(arg gui)">
+        <node name="gazebo_gui" pkg="gazebo_ros" type="gzclient" respawn="false" output="screen"
+              args="--verbose --gui-client-plugin libgazebo_goal_tool.so --gui-client-plugin libgazebo_nav_goal_gui.so"/>
+    </group>
 
     <param name="robot_description" command="$(find xacro)/xacro $(arg model)"/>
 

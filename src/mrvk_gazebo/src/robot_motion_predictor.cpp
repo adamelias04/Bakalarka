@@ -95,6 +95,8 @@ public:
     private_nh_.param("scan_scale_steps",         scan_scale_steps_,         8);
     private_nh_.param("max_vel_x_cap",            max_vel_x_cap_,            1.5);
     private_nh_.param("obstacle_prediction_dt",   obstacle_prediction_dt_,   0.1);
+    private_nh_.param("temporal_prediction_time", temporal_prediction_time_, 3.0);
+    private_nh_.param("temporal_reverse_velocity", temporal_reverse_velocity_, -0.5);
 
     if (prediction_dt_ < 1e-3)
       prediction_dt_ = 1e-3;
@@ -391,22 +393,41 @@ private:
           }
         }
 
-        // 3) REVERSE — ak imminent a tyl je volny, znovu-pouzijeme
-        //    existujucu reverse logiku.
-        if (!tmode && tc.t_conflict <= reverse_horizon_ && msg->linear.x > 0.0)
+        // 3) STOP — ale len ak zastavenie naozaj riesi konflikt
+        //    (prekazka neprichadza priamo na nas). Overime cez
+        //    checkTemporalConflict s v=0.
+        if (!tmode)
+        {
+          const TemporalConflict tc_stop =
+              checkTemporalConflict(odom, obs_path_local, 0.0, 0.0);
+          if (!tc_stop.present)
+          {
+            out.linear.x = 0.0;
+            out.linear.y = 0.0;
+            tmode = "TEMPORAL_STOP";
+          }
+        }
+
+        // 4) REVERSE — prekazka ide priamo na nas (zastavenie nepomoze),
+        //    cuvneme okamzite agresivnejsie nez bezny reverse (0.5 m/s
+        //    default). Guard msg->linear.x > 0 je zruseny — TEB casto
+        //    posle v=0 lebo sam vidi obstacle v costmape, ale temporal
+        //    REVERSE musi fungovat aj vtedy.
+        if (!tmode)
         {
           const Point2D p0{odom.pose.pose.position.x, odom.pose.pose.position.y};
           const double yaw0 = yawFromQuaternion(odom.pose.pose.orientation);
           if (isRearClear(costmap, p0, yaw0))
           {
-            out.linear.x  = reverse_velocity_;
+            out.linear.x  = temporal_reverse_velocity_;
             out.linear.y  = 0.0;
             out.angular.z = 0.0;
             tmode = "TEMPORAL_REVERSE";
           }
         }
 
-        // 4) STOP fallback
+        // 5) STOP fallback — ziadny manevor nepomaha (tyl blokovany),
+        //    posledna moznost.
         if (!tmode)
         {
           out.linear.x = 0.0;
@@ -658,7 +679,7 @@ private:
     double cy = odom.pose.pose.position.y;
     double cyaw = yaw0;
 
-    const int n_steps = static_cast<int>(std::ceil(prediction_time_ / prediction_dt_));
+    const int n_steps = static_cast<int>(std::ceil(temporal_prediction_time_ / prediction_dt_));
     const double base_offset = age;  // (now - path.stamp) v sekundach
 
     const int n_obs = static_cast<int>(obs_path.poses.size());
@@ -781,6 +802,8 @@ private:
   int    scan_scale_steps_;
   double max_vel_x_cap_;
   double obstacle_prediction_dt_;
+  double temporal_prediction_time_;
+  double temporal_reverse_velocity_;
 };
 
 }  // namespace

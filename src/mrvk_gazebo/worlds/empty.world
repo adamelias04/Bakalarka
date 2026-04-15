@@ -63,20 +63,8 @@
       <real_time_update_rate>100</real_time_update_rate>
     </physics>
 
-    <gui fullscreen="0">
-      <plugin name="gazebo_goal_tool" filename="libgazebo_goal_tool.so">
-        <frame_id>odom</frame_id>
-        <ground_z>0.0</ground_z>
-        <x>18</x>
-        <y>462</y>
-      </plugin>
-      <plugin name="gazebo_nav_goal_gui" filename="libgazebo_nav_goal_gui.so">
-        <topic>/move_base_simple/goal</topic>
-        <default_frame>odom</default_frame>
-        <x>18</x>
-        <y>20</y>
-      </plugin>
-    </gui>
+    <!-- GUI pluginy (gazebo_goal_tool, gazebo_nav_goal_gui) su teraz
+         nacitane cez -g flag v gazebo.launch, takze funguju pre kazdy svet. -->
 
   </world>
 </sdf>

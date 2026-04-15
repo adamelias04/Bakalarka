@@ -46,8 +46,8 @@ private:
 
   std::string mouseFilterName_{"gazebo_goal_tool_filter"};
   std::string frameId_{"odom"};
-  int posX_{18};
-  int posY_{42};
+  int posX_{170};
+  int posY_{455};
   double groundZ_{0.0};
 
   ignition::math::Vector3d dragStart_;

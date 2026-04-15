@@ -7,8 +7,8 @@
 
     <arg name="world_file" default="$(find mrvk_gazebo)/worlds/empty.world"/>
 
-    <arg name="init_x" default="0"/>
-    <arg name="init_y" default="5"/>
+    <arg name="init_x" default="3"/>
+    <arg name="init_y" default="0"/>
     <arg name="init_z" default="0.3"/>
     <arg name="init_yaw" default="3.14"/>
 
@@ -133,7 +133,9 @@
         <param name="speedup_max_scale" value="1.6"/>
         <param name="slow_min_scale" value="0.2"/>
         <param name="scan_scale_steps" value="8"/>
-        <param name="max_vel_x_cap" value="1.5"/>
+        <param name="max_vel_x_cap" value="1.0"/>
+        <param name="temporal_prediction_time" value="3.0"/>
+        <param name="temporal_reverse_velocity" value="-0.5"/>
     </node>
 
     <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
@@ -145,6 +147,7 @@
 
         <rosparam file="$(find mrvk_gazebo)/config/navigation/base_local_planner.yaml" command="load"/>
         <rosparam file="$(find mrvk_gazebo)/config/navigation/move_base.yaml" command="load"/>
+        <rosparam file="$(find mrvk_gazebo)/config/navigation/dwa_local_planner.yaml" command="load"/>
         <rosparam file="$(find mrvk_gazebo)/config/navigation/teb_local_planner.yaml" command="load"/>
 
         <remap from="/cmd_vel" to="/cmd_vel_raw"/>
