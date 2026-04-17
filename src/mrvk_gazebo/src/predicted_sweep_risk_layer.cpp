@@ -35,10 +35,15 @@ PredictedSweepRiskLayer::PredictedSweepRiskLayer()
 void PredictedSweepRiskLayer::onInitialize()
 {
     ros::NodeHandle nh("~/" + name_);
-
     current_ = true;
     enabled_ = true;
+    loadParams(nh);
+    setupIO(nh);
+    ROS_INFO("[%s] PredictedSweepRiskLayer initialized", name_.c_str());
+}
 
+void PredictedSweepRiskLayer::loadParams(ros::NodeHandle& nh)
+{
     nh.param<std::string>("path_topic", path_topic_, std::string("/predicted_obstacle_path"));
     nh.param<std::string>("pose_topic", pose_topic_, std::string("/detected_obstacle_pose"));
     nh.param<std::string>("visualization_topic", visualization_topic_, std::string("/predicted_sweep_safe_zone"));
@@ -78,23 +83,22 @@ void PredictedSweepRiskLayer::onInitialize()
     nh.param("publish_visualization", publish_visualization_, true);
     nh.param("publish_via_points", publish_via_points_, true);
     nh.param("require_fresh_observation", require_fresh_observation_, true);
+}
 
+void PredictedSweepRiskLayer::setupIO(ros::NodeHandle& nh)
+{
     path_sub_ = nh.subscribe(path_topic_, 1, &PredictedSweepRiskLayer::pathCallback, this);
     pose_sub_ = nh.subscribe(pose_topic_, 1, &PredictedSweepRiskLayer::poseCallback, this);
     marker_pub_ = nh.advertise<visualization_msgs::Marker>(visualization_topic_, 8, true);
     via_points_pub_ = nh.advertise<nav_msgs::Path>(via_points_topic_, 1, true);
     via_points_marker_pub_ = nh.advertise<visualization_msgs::Marker>(via_points_marker_topic_, 2, true);
-
-    ROS_INFO("[%s] PredictedSweepRiskLayer initialized", name_.c_str());
 }
 
 void PredictedSweepRiskLayer::reset()
 {
     suppress_via_points_ = false;
     has_suppress_motion_dir_ = false;
-    clearVisualization();
-    clearViaPoints();
-    clearViaPointMarkers();
+    clearAllOverlays();
     deactivate();
     activate();
 }
@@ -123,20 +127,63 @@ void PredictedSweepRiskLayer::poseCallback(const geometry_msgs::PoseStamped::Con
     publishVisualization();
 }
 
+/* ──────── Utility helpers ──────── */
+
 double PredictedSweepRiskLayer::clamp01(double v) const
-{
-    return std::max(0.0, std::min(1.0, v));
-}
+{ return std::max(0.0, std::min(1.0, v)); }
 
 double PredictedSweepRiskLayer::norm2d(double x, double y) const
-{
-    return std::sqrt(x * x + y * y);
-}
+{ return std::hypot(x, y); }
 
 double PredictedSweepRiskLayer::distance2d(double x0, double y0, double x1, double y1) const
+{ return std::hypot(x1 - x0, y1 - y0); }
+
+std::string PredictedSweepRiskLayer::resolveFrameId() const
 {
-    return norm2d(x1 - x0, y1 - y0);
+    if (!latest_path_.header.frame_id.empty())
+        return latest_path_.header.frame_id;
+    if (!latest_pose_.header.frame_id.empty())
+        return latest_pose_.header.frame_id;
+    return layered_costmap_->getGlobalFrameID();
 }
+
+ros::Time PredictedSweepRiskLayer::referenceStamp() const
+{
+    return !latest_path_.header.stamp.isZero() ? latest_path_.header.stamp : ros::Time::now();
+}
+
+void PredictedSweepRiskLayer::clearAllOverlays()
+{
+    clearVisualization();
+    clearViaPoints();
+    clearViaPointMarkers();
+}
+
+void PredictedSweepRiskLayer::expandBounds(double* min_x, double* min_y,
+                                           double* max_x, double* max_y,
+                                           double px, double py, double pad) const
+{
+    *min_x = std::min(*min_x, px - pad);
+    *min_y = std::min(*min_y, py - pad);
+    *max_x = std::max(*max_x, px + pad);
+    *max_y = std::max(*max_y, py + pad);
+}
+
+void PredictedSweepRiskLayer::deleteMarker(ros::Publisher& pub,
+                                           const std::string& ns,
+                                           int id,
+                                           const std::string& frame_id) const
+{
+    visualization_msgs::Marker marker;
+    marker.header.stamp = ros::Time::now();
+    marker.header.frame_id = frame_id;
+    marker.ns = ns;
+    marker.id = id;
+    marker.action = visualization_msgs::Marker::DELETE;
+    pub.publish(marker);
+}
+
+/* ──────── Geometry primitives ──────── */
 
 double PredictedSweepRiskLayer::pointToSegmentDistance(double px, double py,
                                                        double x0, double y0,
@@ -150,112 +197,29 @@ double PredictedSweepRiskLayer::pointToSegmentDistance(double px, double py,
         return distance2d(px, py, x0, y0);
 
     const double t = clamp01(((px - x0) * dx + (py - y0) * dy) / len_sq);
-    const double proj_x = x0 + t * dx;
-    const double proj_y = y0 + t * dy;
-    return distance2d(px, py, proj_x, proj_y);
+    return distance2d(px, py, x0 + t * dx, y0 + t * dy);
 }
 
-void PredictedSweepRiskLayer::stampCircleCost(costmap_2d::Costmap2D& master_grid,
-                                              double wx, double wy,
-                                              double radius,
-                                              unsigned char cost) const
+PredictedSweepRiskLayer::Point2D PredictedSweepRiskLayer::offsetPoint(const Point2D& point,
+                                                                      const Point2D& dir,
+                                                                      double distance) const
 {
-    const double resolution = master_grid.getResolution();
-    const int cell_radius = std::max(1, static_cast<int>(std::ceil(radius / std::max(resolution, 1e-6))));
-
-    unsigned int center_mx = 0;
-    unsigned int center_my = 0;
-    if (!master_grid.worldToMap(wx, wy, center_mx, center_my))
-        return;
-
-    for (int dy = -cell_radius; dy <= cell_radius; ++dy)
-    {
-        for (int dx = -cell_radius; dx <= cell_radius; ++dx)
-        {
-            const int mx_i = static_cast<int>(center_mx) + dx;
-            const int my_i = static_cast<int>(center_my) + dy;
-
-            if (mx_i < 0 || my_i < 0 ||
-                mx_i >= static_cast<int>(master_grid.getSizeInCellsX()) ||
-                my_i >= static_cast<int>(master_grid.getSizeInCellsY()))
-            {
-                continue;
-            }
-
-            double cell_wx = 0.0;
-            double cell_wy = 0.0;
-            master_grid.mapToWorld(static_cast<unsigned int>(mx_i), static_cast<unsigned int>(my_i), cell_wx, cell_wy);
-
-            if (distance2d(cell_wx, cell_wy, wx, wy) > radius)
-                continue;
-
-            const unsigned char old_cost =
-                master_grid.getCost(static_cast<unsigned int>(mx_i), static_cast<unsigned int>(my_i));
-
-            if (old_cost == costmap_2d::NO_INFORMATION)
-                master_grid.setCost(static_cast<unsigned int>(mx_i), static_cast<unsigned int>(my_i), cost);
-            else
-                master_grid.setCost(static_cast<unsigned int>(mx_i), static_cast<unsigned int>(my_i),
-                                    std::max(old_cost, cost));
-        }
-    }
+    return {point.x + dir.x * distance, point.y + dir.y * distance};
 }
 
-void PredictedSweepRiskLayer::applyPathTubeCosts(costmap_2d::Costmap2D& master_grid) const
+/* ──────── Sweep geometry ──────── */
+
+PredictedSweepRiskLayer::Point2D PredictedSweepRiskLayer::selectStartPoint() const
 {
-    if (!has_path_ || latest_path_.poses.empty())
-        return;
+    Point2D start{latest_path_.poses.front().pose.position.x,
+                  latest_path_.poses.front().pose.position.y};
 
-    const unsigned char lethal_cost =
-        static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), path_cost_));
-
-    Point2D prev = selectStartPoint();
-    double accumulated = 0.0;
-    const double step = std::max(0.5 * master_grid.getResolution(), 0.02);
-
-    for (const auto& pose_stamped : latest_path_.poses)
+    if (use_pose_as_start_ && has_pose_ && hasFreshObservation())
     {
-        Point2D cur;
-        cur.x = pose_stamped.pose.position.x;
-        cur.y = pose_stamped.pose.position.y;
-
-        const double seg = distance2d(prev.x, prev.y, cur.x, cur.y);
-        if (seg < 1e-6)
-        {
-            prev = cur;
-            continue;
-        }
-
-        Point2D seg_end = cur;
-        double used_seg = seg;
-        if (accumulated + seg > max_path_length_)
-        {
-            const double remain = std::max(0.0, max_path_length_ - accumulated);
-            const double ratio = remain / seg;
-            seg_end.x = prev.x + ratio * (cur.x - prev.x);
-            seg_end.y = prev.y + ratio * (cur.y - prev.y);
-            used_seg = remain;
-        }
-
-        const double dx = seg_end.x - prev.x;
-        const double dy = seg_end.y - prev.y;
-        const double length = std::max(distance2d(prev.x, prev.y, seg_end.x, seg_end.y), 1e-6);
-        const int steps = std::max(1, static_cast<int>(std::ceil(length / step)));
-
-        for (int i = 0; i <= steps; ++i)
-        {
-            const double ratio = static_cast<double>(i) / static_cast<double>(steps);
-            const double wx = prev.x + ratio * dx;
-            const double wy = prev.y + ratio * dy;
-            stampCircleCost(master_grid, wx, wy, predicted_path_half_width_, lethal_cost);
-        }
-
-        accumulated += used_seg;
-        if (accumulated >= max_path_length_)
-            break;
-
-        prev = cur;
+        start.x = latest_pose_.pose.position.x;
+        start.y = latest_pose_.pose.position.y;
     }
+    return start;
 }
 
 bool PredictedSweepRiskLayer::hasUsableGeometry() const
@@ -285,19 +249,14 @@ bool PredictedSweepRiskLayer::hasFreshObservation() const
 
     if (!path_stamp.isZero() && !pose_stamp.isZero())
     {
-        const double dt = std::fabs((path_stamp - pose_stamp).toSec());
-        if (dt > pose_staleness_tolerance_)
+        if (std::fabs((path_stamp - pose_stamp).toSec()) > pose_staleness_tolerance_)
             return false;
     }
 
-    const double deviation = distance2d(latest_path_.poses.front().pose.position.x,
-                                        latest_path_.poses.front().pose.position.y,
-                                        latest_pose_.pose.position.x,
-                                        latest_pose_.pose.position.y);
-    if (deviation > pose_path_deviation_tolerance_)
-        return false;
-
-    return true;
+    return distance2d(latest_path_.poses.front().pose.position.x,
+                      latest_path_.poses.front().pose.position.y,
+                      latest_pose_.pose.position.x,
+                      latest_pose_.pose.position.y) <= pose_path_deviation_tolerance_;
 }
 
 bool PredictedSweepRiskLayer::canUseHeldMotion() const
@@ -305,17 +264,11 @@ bool PredictedSweepRiskLayer::canUseHeldMotion() const
     if (!has_cached_motion_ || cached_motion_length_ <= 1e-6)
         return false;
 
-    const ros::Time reference_stamp = !latest_path_.header.stamp.isZero()
-        ? latest_path_.header.stamp
-        : ros::Time::now();
-
     if (!cached_motion_stamp_.isZero())
     {
-        const double dt = std::fabs((reference_stamp - cached_motion_stamp_).toSec());
-        if (dt > low_speed_hold_time_)
+        if (std::fabs((referenceStamp() - cached_motion_stamp_).toSec()) > low_speed_hold_time_)
             return false;
     }
-
     return true;
 }
 
@@ -324,35 +277,12 @@ bool PredictedSweepRiskLayer::canUseCachedGeometry() const
     if (!has_cached_geometry_)
         return false;
 
-    const ros::Time reference_stamp = !latest_path_.header.stamp.isZero()
-        ? latest_path_.header.stamp
-        : ros::Time::now();
-
     if (!cached_geometry_stamp_.isZero())
     {
-        const double dt = std::fabs((reference_stamp - cached_geometry_stamp_).toSec());
-        if (dt > geometry_hold_time_)
+        if (std::fabs((referenceStamp() - cached_geometry_stamp_).toSec()) > geometry_hold_time_)
             return false;
     }
-
     return true;
-}
-
-PredictedSweepRiskLayer::Point2D PredictedSweepRiskLayer::selectStartPoint() const
-{
-    Point2D start;
-    start.x = latest_path_.poses.front().pose.position.x;
-    start.y = latest_path_.poses.front().pose.position.y;
-
-    if (!use_pose_as_start_ || !has_pose_)
-        return start;
-
-    if (!hasFreshObservation())
-        return start;
-
-    start.x = latest_pose_.pose.position.x;
-    start.y = latest_pose_.pose.position.y;
-    return start;
 }
 
 bool PredictedSweepRiskLayer::buildSweepGeometry(SweepGeometry& geometry) const
@@ -361,26 +291,20 @@ bool PredictedSweepRiskLayer::buildSweepGeometry(SweepGeometry& geometry) const
     {
         if (!canUseCachedGeometry())
             return false;
-
         geometry = cached_geometry_;
         return true;
     }
 
     geometry.start = selectStartPoint();
-
     geometry.end = geometry.start;
     double accumulated = 0.0;
 
     for (std::size_t i = 1; i < latest_path_.poses.size(); ++i)
     {
-        Point2D prev;
-        prev.x = latest_path_.poses[i - 1].pose.position.x;
-        prev.y = latest_path_.poses[i - 1].pose.position.y;
-
-        Point2D cur;
-        cur.x = latest_path_.poses[i].pose.position.x;
-        cur.y = latest_path_.poses[i].pose.position.y;
-
+        const Point2D prev{latest_path_.poses[i - 1].pose.position.x,
+                           latest_path_.poses[i - 1].pose.position.y};
+        const Point2D cur{latest_path_.poses[i].pose.position.x,
+                          latest_path_.poses[i].pose.position.y};
         const double seg = distance2d(prev.x, prev.y, cur.x, cur.y);
 
         if (accumulated + seg >= max_path_length_)
@@ -425,35 +349,26 @@ bool PredictedSweepRiskLayer::buildSweepGeometry(SweepGeometry& geometry) const
         geometry.dir.y /= geometry.length;
         cached_motion_dir_ = geometry.dir;
         cached_motion_length_ = geometry.length;
-        cached_motion_stamp_ = !latest_path_.header.stamp.isZero() ? latest_path_.header.stamp : ros::Time::now();
+        cached_motion_stamp_ = referenceStamp();
         has_cached_motion_ = true;
     }
 
     geometry.normal.x = -geometry.dir.y;
     geometry.normal.y =  geometry.dir.x;
     cached_geometry_ = geometry;
-    cached_geometry_stamp_ = !latest_path_.header.stamp.isZero() ? latest_path_.header.stamp : ros::Time::now();
+    cached_geometry_stamp_ = referenceStamp();
     has_cached_geometry_ = true;
 
     return true;
 }
 
-PredictedSweepRiskLayer::Point2D PredictedSweepRiskLayer::offsetPoint(const Point2D& point,
-                                                                      const Point2D& dir,
-                                                                      double distance) const
-{
-    Point2D shifted;
-    shifted.x = point.x + dir.x * distance;
-    shifted.y = point.y + dir.y * distance;
-    return shifted;
-}
+/* ──────── Zone geometry ──────── */
 
 PredictedSweepRiskLayer::ZoneGeometry PredictedSweepRiskLayer::computeRearZone(const SweepGeometry& geometry) const
 {
     ZoneGeometry zone;
     zone.near_point = offsetPoint(geometry.start, geometry.dir, -(obstacle_radius_ + visualization_clearance_));
-    zone.dir.x = -geometry.dir.x;
-    zone.dir.y = -geometry.dir.y;
+    zone.dir = {-geometry.dir.x, -geometry.dir.y};
     zone.length = std::max(geometry.length * rear_zone_length_scale_, 1e-3);
     return zone;
 }
@@ -488,14 +403,11 @@ PredictedSweepRiskLayer::ZoneGeometry PredictedSweepRiskLayer::computeUnsafeMidd
 PredictedSweepRiskLayer::ZoneGeometry PredictedSweepRiskLayer::selectPreferredViaZone(const SweepGeometry& geometry) const
 {
     const ZoneGeometry rear_zone = computeRearZone(geometry);
+
+    if (prefer_rear_via_zone_ || !has_robot_pose_)
+        return rear_zone;
+
     const ZoneGeometry front_zone = computeFrontZone(geometry);
-
-    if (prefer_rear_via_zone_)
-        return rear_zone;
-
-    if (!has_robot_pose_)
-        return rear_zone;
-
     const Point2D rear_center = computeZoneCenter(rear_zone);
     const Point2D front_center = computeZoneCenter(front_zone);
     const double rear_dist = distance2d(last_robot_pose_.x, last_robot_pose_.y, rear_center.x, rear_center.y);
@@ -518,37 +430,98 @@ std::vector<PredictedSweepRiskLayer::Point2D> PredictedSweepRiskLayer::buildViaP
 {
     std::vector<Point2D> points;
     points.reserve(2);
-
-    const ZoneGeometry rear_zone = computeRearZone(geometry);
-    appendZoneViaPoints(rear_zone, &points);
-
+    appendZoneViaPoints(computeRearZone(geometry), &points);
     return points;
 }
 
-unsigned char PredictedSweepRiskLayer::computeZoneCostAt(double wx, double wy,
-                                                         const SweepGeometry& geometry,
-                                                         const ZoneGeometry& zone) const
+/* ──────── Cost computation ──────── */
+
+void PredictedSweepRiskLayer::stampCircleCost(costmap_2d::Costmap2D& master_grid,
+                                              double wx, double wy,
+                                              double radius,
+                                              unsigned char cost) const
 {
-    const double outer_half_width = corridor_half_width_ + side_extra_width_;
-    const double dx = wx - zone.near_point.x;
-    const double dy = wy - zone.near_point.y;
+    const double resolution = master_grid.getResolution();
+    const int cell_radius = std::max(1, static_cast<int>(std::ceil(radius / std::max(resolution, 1e-6))));
 
-    const double longitudinal = dx * zone.dir.x + dy * zone.dir.y;
-    const double lateral = std::fabs(dx * geometry.normal.x + dy * geometry.normal.y);
+    unsigned int center_mx = 0, center_my = 0;
+    if (!master_grid.worldToMap(wx, wy, center_mx, center_my))
+        return;
 
-    if (longitudinal < 0.0 || longitudinal > zone.length)
-        return costmap_2d::FREE_SPACE;
+    for (int dy = -cell_radius; dy <= cell_radius; ++dy)
+    {
+        for (int dx = -cell_radius; dx <= cell_radius; ++dx)
+        {
+            const int mx_i = static_cast<int>(center_mx) + dx;
+            const int my_i = static_cast<int>(center_my) + dy;
 
-    if (lateral <= corridor_half_width_ || lateral > outer_half_width)
-        return costmap_2d::FREE_SPACE;
+            if (mx_i < 0 || my_i < 0 ||
+                mx_i >= static_cast<int>(master_grid.getSizeInCellsX()) ||
+                my_i >= static_cast<int>(master_grid.getSizeInCellsY()))
+                continue;
 
-    const double zone_ratio = longitudinal / std::max(zone.length, 1e-6);
-    const double long_gain = 0.5 + 0.5 * (1.0 - std::fabs(2.0 * zone_ratio - 1.0));
-    const double lat_norm = (lateral - corridor_half_width_) / std::max(side_extra_width_, 1e-6);
-    const double lat_gain = 1.0 - lat_norm;
-    const double gain = clamp01(long_gain) * clamp01(lat_gain);
-    const int cost = static_cast<int>(std::round(side_cost_ * gain));
-    return static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), cost));
+            double cell_wx = 0.0, cell_wy = 0.0;
+            master_grid.mapToWorld(static_cast<unsigned int>(mx_i), static_cast<unsigned int>(my_i), cell_wx, cell_wy);
+
+            if (distance2d(cell_wx, cell_wy, wx, wy) > radius)
+                continue;
+
+            const unsigned int umx = static_cast<unsigned int>(mx_i);
+            const unsigned int umy = static_cast<unsigned int>(my_i);
+            const unsigned char old_cost = master_grid.getCost(umx, umy);
+            master_grid.setCost(umx, umy,
+                                (old_cost == costmap_2d::NO_INFORMATION) ? cost : std::max(old_cost, cost));
+        }
+    }
+}
+
+void PredictedSweepRiskLayer::applyPathTubeCosts(costmap_2d::Costmap2D& master_grid) const
+{
+    if (!has_path_ || latest_path_.poses.empty())
+        return;
+
+    const unsigned char lethal_cost =
+        static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), path_cost_));
+
+    Point2D prev = selectStartPoint();
+    double accumulated = 0.0;
+    const double step = std::max(0.5 * master_grid.getResolution(), 0.02);
+
+    for (const auto& pose_stamped : latest_path_.poses)
+    {
+        const Point2D cur{pose_stamped.pose.position.x, pose_stamped.pose.position.y};
+        const double seg = distance2d(prev.x, prev.y, cur.x, cur.y);
+        if (seg < 1e-6) { prev = cur; continue; }
+
+        Point2D seg_end = cur;
+        double used_seg = seg;
+        if (accumulated + seg > max_path_length_)
+        {
+            const double remain = std::max(0.0, max_path_length_ - accumulated);
+            const double ratio = remain / seg;
+            seg_end.x = prev.x + ratio * (cur.x - prev.x);
+            seg_end.y = prev.y + ratio * (cur.y - prev.y);
+            used_seg = remain;
+        }
+
+        const double dx = seg_end.x - prev.x;
+        const double dy = seg_end.y - prev.y;
+        const double length = std::max(distance2d(prev.x, prev.y, seg_end.x, seg_end.y), 1e-6);
+        const int steps = std::max(1, static_cast<int>(std::ceil(length / step)));
+
+        for (int i = 0; i <= steps; ++i)
+        {
+            const double ratio = static_cast<double>(i) / static_cast<double>(steps);
+            stampCircleCost(master_grid, prev.x + ratio * dx, prev.y + ratio * dy,
+                            predicted_path_half_width_, lethal_cost);
+        }
+
+        accumulated += used_seg;
+        if (accumulated >= max_path_length_)
+            break;
+
+        prev = cur;
+    }
 }
 
 unsigned char PredictedSweepRiskLayer::computeMiddleZoneCostAt(double wx, double wy,
@@ -576,98 +549,8 @@ unsigned char PredictedSweepRiskLayer::computeMiddleZoneCostAt(double wx, double
     }
 
     const double lat_norm = (lateral - corridor_half_width_) / std::max(side_extra_width_, 1e-6);
-    const double lat_gain = 1.0 - lat_norm;
-    const int cost = static_cast<int>(std::round(side_cost_ * clamp01(lat_gain)));
+    const int cost = static_cast<int>(std::round(side_cost_ * clamp01(1.0 - lat_norm)));
     return static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), cost));
-}
-
-void PredictedSweepRiskLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw*/,
-                                           double* min_x, double* min_y, double* max_x, double* max_y)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    has_robot_pose_ = true;
-    last_robot_pose_.x = robot_x;
-    last_robot_pose_.y = robot_y;
-
-    if (!enabled_)
-        return;
-
-    SweepGeometry geometry;
-    if (!buildSweepGeometry(geometry))
-        return;
-
-    const double pad = std::max(obstacle_radius_, corridor_half_width_ + side_extra_width_) + 0.2;
-    const ZoneGeometry rear_zone = computeRearZone(geometry);
-    const ZoneGeometry front_zone = computeFrontZone(geometry);
-    const Point2D rear_far = offsetPoint(rear_zone.near_point, rear_zone.dir, rear_zone.length);
-    const Point2D front_far = offsetPoint(front_zone.near_point, front_zone.dir, front_zone.length);
-
-    *min_x = std::min(*min_x, geometry.start.x - pad);
-    *min_y = std::min(*min_y, geometry.start.y - pad);
-    *max_x = std::max(*max_x, geometry.start.x + pad);
-    *max_y = std::max(*max_y, geometry.start.y + pad);
-
-    *min_x = std::min(*min_x, rear_zone.near_point.x - pad);
-    *min_y = std::min(*min_y, rear_zone.near_point.y - pad);
-    *max_x = std::max(*max_x, rear_zone.near_point.x + pad);
-    *max_y = std::max(*max_y, rear_zone.near_point.y + pad);
-
-    *min_x = std::min(*min_x, rear_far.x - pad);
-    *min_y = std::min(*min_y, rear_far.y - pad);
-    *max_x = std::max(*max_x, rear_far.x + pad);
-    *max_y = std::max(*max_y, rear_far.y + pad);
-
-    *min_x = std::min(*min_x, front_zone.near_point.x - pad);
-    *min_y = std::min(*min_y, front_zone.near_point.y - pad);
-    *max_x = std::max(*max_x, front_zone.near_point.x + pad);
-    *max_y = std::max(*max_y, front_zone.near_point.y + pad);
-
-    *min_x = std::min(*min_x, front_far.x - pad);
-    *min_y = std::min(*min_y, front_far.y - pad);
-    *max_x = std::max(*max_x, front_far.x + pad);
-    *max_y = std::max(*max_y, front_far.y + pad);
-
-    if (has_path_ && !latest_path_.poses.empty())
-    {
-        const double path_pad = std::max(predicted_path_half_width_, obstacle_radius_) + 0.1;
-        Point2D prev = selectStartPoint();
-        double accumulated = 0.0;
-
-        for (const auto& pose_stamped : latest_path_.poses)
-        {
-            Point2D cur;
-            cur.x = pose_stamped.pose.position.x;
-            cur.y = pose_stamped.pose.position.y;
-
-            const double seg = distance2d(prev.x, prev.y, cur.x, cur.y);
-            if (seg < 1e-6)
-            {
-                prev = cur;
-                continue;
-            }
-
-            Point2D seg_end = cur;
-            if (accumulated + seg > max_path_length_)
-            {
-                const double remain = std::max(0.0, max_path_length_ - accumulated);
-                const double ratio = remain / seg;
-                seg_end.x = prev.x + ratio * (cur.x - prev.x);
-                seg_end.y = prev.y + ratio * (cur.y - prev.y);
-            }
-
-            *min_x = std::min(*min_x, std::min(prev.x, seg_end.x) - path_pad);
-            *min_y = std::min(*min_y, std::min(prev.y, seg_end.y) - path_pad);
-            *max_x = std::max(*max_x, std::max(prev.x, seg_end.x) + path_pad);
-            *max_y = std::max(*max_y, std::max(prev.y, seg_end.y) + path_pad);
-
-            accumulated += std::min(seg, std::max(0.0, max_path_length_ - (accumulated)));
-            if (accumulated >= max_path_length_)
-                break;
-
-            prev = cur;
-        }
-    }
 }
 
 unsigned char PredictedSweepRiskLayer::computePathTubeCostAt(double wx, double wy) const
@@ -681,16 +564,9 @@ unsigned char PredictedSweepRiskLayer::computePathTubeCostAt(double wx, double w
 
     for (const auto& pose_stamped : latest_path_.poses)
     {
-        Point2D cur;
-        cur.x = pose_stamped.pose.position.x;
-        cur.y = pose_stamped.pose.position.y;
-
+        const Point2D cur{pose_stamped.pose.position.x, pose_stamped.pose.position.y};
         const double seg = distance2d(prev.x, prev.y, cur.x, cur.y);
-        if (seg < 1e-6)
-        {
-            prev = cur;
-            continue;
-        }
+        if (seg < 1e-6) { prev = cur; continue; }
 
         Point2D seg_end = cur;
         double used_seg = seg;
@@ -715,7 +591,6 @@ unsigned char PredictedSweepRiskLayer::computePathTubeCostAt(double wx, double w
 
     if (best_distance <= predicted_path_half_width_)
         return static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), path_cost_));
-
     return costmap_2d::FREE_SPACE;
 }
 
@@ -733,16 +608,340 @@ unsigned char PredictedSweepRiskLayer::computeCostAt(double wx, double wy, const
         return costmap_2d::FREE_SPACE;
 
     const SweepGeometry& geometry = *geometry_ptr;
-    const double dist_to_start = distance2d(wx, wy, geometry.start.x, geometry.start.y);
-    if (dist_to_start <= obstacle_radius_)
+
+    if (distance2d(wx, wy, geometry.start.x, geometry.start.y) <= obstacle_radius_)
         return static_cast<unsigned char>(std::min(static_cast<int>(costmap_2d::LETHAL_OBSTACLE), body_cost_));
 
-    const ZoneGeometry middle_zone = computeUnsafeMiddleZone(geometry);
-
-    const unsigned char middle_cost = computeMiddleZoneCostAt(wx, wy, geometry, middle_zone);
-    const unsigned char path_cost = computePathTubeCostAt(wx, wy);
-    return std::max(path_cost, middle_cost);
+    const unsigned char middle_cost = computeMiddleZoneCostAt(wx, wy, geometry, computeUnsafeMiddleZone(geometry));
+    return std::max(computePathTubeCostAt(wx, wy), middle_cost);
 }
+
+/* ──────── Costmap layer interface ──────── */
+
+void PredictedSweepRiskLayer::updateBounds(double robot_x, double robot_y, double /*robot_yaw*/,
+                                           double* min_x, double* min_y, double* max_x, double* max_y)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    has_robot_pose_ = true;
+    last_robot_pose_.x = robot_x;
+    last_robot_pose_.y = robot_y;
+
+    if (!enabled_)
+        return;
+
+    SweepGeometry geometry;
+    if (!buildSweepGeometry(geometry))
+        return;
+
+    const double pad = std::max(obstacle_radius_, corridor_half_width_ + side_extra_width_) + 0.2;
+    const ZoneGeometry rear_zone = computeRearZone(geometry);
+    const ZoneGeometry front_zone = computeFrontZone(geometry);
+    const Point2D rear_far = offsetPoint(rear_zone.near_point, rear_zone.dir, rear_zone.length);
+    const Point2D front_far = offsetPoint(front_zone.near_point, front_zone.dir, front_zone.length);
+
+    expandBounds(min_x, min_y, max_x, max_y, geometry.start.x, geometry.start.y, pad);
+    expandBounds(min_x, min_y, max_x, max_y, rear_zone.near_point.x, rear_zone.near_point.y, pad);
+    expandBounds(min_x, min_y, max_x, max_y, rear_far.x, rear_far.y, pad);
+    expandBounds(min_x, min_y, max_x, max_y, front_zone.near_point.x, front_zone.near_point.y, pad);
+    expandBounds(min_x, min_y, max_x, max_y, front_far.x, front_far.y, pad);
+
+    if (has_path_ && !latest_path_.poses.empty())
+    {
+        const double path_pad = std::max(predicted_path_half_width_, obstacle_radius_) + 0.1;
+        Point2D prev = selectStartPoint();
+        double accumulated = 0.0;
+
+        for (const auto& pose_stamped : latest_path_.poses)
+        {
+            const Point2D cur{pose_stamped.pose.position.x, pose_stamped.pose.position.y};
+            const double seg = distance2d(prev.x, prev.y, cur.x, cur.y);
+            if (seg < 1e-6) { prev = cur; continue; }
+
+            Point2D seg_end = cur;
+            if (accumulated + seg > max_path_length_)
+            {
+                const double remain = std::max(0.0, max_path_length_ - accumulated);
+                const double ratio = remain / seg;
+                seg_end.x = prev.x + ratio * (cur.x - prev.x);
+                seg_end.y = prev.y + ratio * (cur.y - prev.y);
+            }
+
+            expandBounds(min_x, min_y, max_x, max_y,
+                          std::min(prev.x, seg_end.x), std::min(prev.y, seg_end.y), path_pad);
+            expandBounds(min_x, min_y, max_x, max_y,
+                          std::max(prev.x, seg_end.x), std::max(prev.y, seg_end.y), path_pad);
+
+            accumulated += std::min(seg, std::max(0.0, max_path_length_ - accumulated));
+            if (accumulated >= max_path_length_)
+                break;
+
+            prev = cur;
+        }
+    }
+}
+
+void PredictedSweepRiskLayer::updateCosts(costmap_2d::Costmap2D& master_grid,
+                                          int min_i, int min_j, int max_i, int max_j)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (isMainGoalReached())
+    {
+        suppress_via_points_ = false;
+        has_suppress_motion_dir_ = false;
+        has_cached_via_points_ = false;
+        cached_via_points_.poses.clear();
+        cached_via_points_stamp_ = ros::Time();
+    }
+
+    if (!enabled_ || !hasUsableGeometry())
+    {
+        clearAllOverlays();
+        return;
+    }
+
+    SweepGeometry geometry;
+    if (!buildSweepGeometry(geometry))
+    {
+        clearAllOverlays();
+        return;
+    }
+
+    publishVisualization();
+    publishViaPoints(geometry);
+
+    if (!apply_costs_)
+        return;
+
+    for (int j = min_j; j < max_j; ++j)
+    {
+        for (int i = min_i; i < max_i; ++i)
+        {
+            double wx, wy;
+            master_grid.mapToWorld(i, j, wx, wy);
+
+            unsigned char risk_cost = computeCostAt(wx, wy, &geometry);
+            if (risk_cost == costmap_2d::FREE_SPACE)
+                continue;
+
+            unsigned char old_cost = master_grid.getCost(i, j);
+            master_grid.setCost(i, j,
+                                (old_cost == costmap_2d::NO_INFORMATION) ? risk_cost : std::max(old_cost, risk_cost));
+        }
+    }
+
+    applyPathTubeCosts(master_grid);
+}
+
+/* ──────── Via-point logic ──────── */
+
+bool PredictedSweepRiskLayer::isMainGoalReached() const
+{
+    if (!has_robot_pose_ || !has_path_ || latest_path_.poses.empty())
+        return false;
+    const auto& goal_pose = latest_path_.poses.back().pose.position;
+    return distance2d(last_robot_pose_.x, last_robot_pose_.y, goal_pose.x, goal_pose.y) <= goal_reached_distance_;
+}
+
+bool PredictedSweepRiskLayer::isViaPointReached(const Point2D& via_point) const
+{
+    if (!has_robot_pose_)
+        return false;
+    return distance2d(last_robot_pose_.x, last_robot_pose_.y, via_point.x, via_point.y) <= via_point_reached_distance_;
+}
+
+double PredictedSweepRiskLayer::rearProgress(const SweepGeometry& geometry) const
+{
+    if (!has_robot_pose_)
+        return -std::numeric_limits<double>::infinity();
+    const double dx = last_robot_pose_.x - geometry.start.x;
+    const double dy = last_robot_pose_.y - geometry.start.y;
+    return dx * (-geometry.dir.x) + dy * (-geometry.dir.y);
+}
+
+bool PredictedSweepRiskLayer::hasRobotBypassedObstacle(const SweepGeometry& geometry) const
+{
+    return has_robot_pose_ && rearProgress(geometry) >= (obstacle_radius_ + bypass_handoff_distance_);
+}
+
+bool PredictedSweepRiskLayer::isGoalCloserThanViaPoint(const Point2D& via_point) const
+{
+    if (!has_robot_pose_ || !has_path_ || latest_path_.poses.empty())
+        return false;
+    const auto& goal_pose = latest_path_.poses.back().pose.position;
+    return distance2d(last_robot_pose_.x, last_robot_pose_.y, goal_pose.x, goal_pose.y) <
+           distance2d(last_robot_pose_.x, last_robot_pose_.y, via_point.x, via_point.y);
+}
+
+void PredictedSweepRiskLayer::publishViaPoints(const SweepGeometry& geometry)
+{
+    if (!publish_via_points_ || !via_points_pub_)
+        return;
+
+    const ros::Time now = ros::Time::now();
+    const ros::Time stamp = !latest_path_.header.stamp.isZero() ? latest_path_.header.stamp : now;
+    const std::string frame_id = resolveFrameId();
+
+    auto buildPathFromPoints = [&](const std::vector<Point2D>& points)
+    {
+        nav_msgs::Path path;
+        path.header.stamp = stamp;
+        path.header.frame_id = frame_id;
+
+        for (const Point2D& point : points)
+        {
+            geometry_msgs::PoseStamped pose;
+            pose.header = path.header;
+            pose.pose.orientation.w = 1.0;
+            pose.pose.position.x = point.x;
+            pose.pose.position.y = point.y;
+            pose.pose.position.z = 0.0;
+            path.poses.push_back(pose);
+        }
+
+        return path;
+    };
+
+    auto publishClearedViaPoints = [&]()
+    {
+        cached_via_points_ = buildPathFromPoints({});
+        cached_via_points_stamp_ = now;
+        has_cached_via_points_ = false;
+        via_points_pub_.publish(cached_via_points_);
+        publishViaPointMarkers(cached_via_points_);
+        via_points_active_ = false;
+    };
+
+    if (!has_path_ || latest_path_.poses.empty())
+    {
+        suppress_via_points_ = false;
+        has_suppress_motion_dir_ = false;
+        publishClearedViaPoints();
+        return;
+    }
+
+    if (isMainGoalReached())
+    {
+        suppress_via_points_ = false;
+        has_suppress_motion_dir_ = false;
+        publishClearedViaPoints();
+        return;
+    }
+
+    // Direction-flip reset: ked sa os pohybu prekazky otocila o viac ako
+    // 90 stupnov oproti smeru, pri ktorom sme sticky flag nastavili, notion
+    // "za prekazkou" sa prevratil. Sticky z predosleho smeru uz nie je
+    // platny (typicky oscilujuca prekazka). Zhasneme flag, nech sa dole
+    // re-evaluate na aktualnej geometrii.
+    if (suppress_via_points_ && has_suppress_motion_dir_)
+    {
+        const double dot = geometry.dir.x * suppress_motion_dir_.x
+                         + geometry.dir.y * suppress_motion_dir_.y;
+        if (dot < 0.0)
+        {
+            suppress_via_points_ = false;
+            has_suppress_motion_dir_ = false;
+        }
+    }
+
+    // Primarny terminator wake-chasingu: ked robot projekcne prejde za
+    // rovinu prekazky (rearProgress >= obstacle_radius + handoff margin),
+    // via-point uz pre tuto epizodu nic nerieši — zhasneme ho natrvalo.
+    // Sticky flag sa zresetuje pri: skonceni trackingu (prazdna path),
+    // dosahnuti hlavneho cielu, alebo ked sa motion direction otoci >90°.
+    if (hasRobotBypassedObstacle(geometry))
+    {
+        suppress_via_points_ = true;
+        suppress_motion_dir_ = geometry.dir;
+        has_suppress_motion_dir_ = true;
+        publishClearedViaPoints();
+        return;
+    }
+
+    if (has_cached_via_points_ && !cached_via_points_stamp_.isZero())
+    {
+        if (!cached_via_points_.poses.empty())
+        {
+            const auto& pose = cached_via_points_.poses.front().pose.position;
+            const Point2D cached_via_point{pose.x, pose.y};
+
+            if (isGoalCloserThanViaPoint(cached_via_point))
+            {
+                publishClearedViaPoints();
+                return;
+            }
+
+            if (isViaPointReached(cached_via_point))
+            {
+                suppress_via_points_ = true;
+                suppress_motion_dir_ = geometry.dir;
+                has_suppress_motion_dir_ = true;
+                publishClearedViaPoints();
+                return;
+            }
+        }
+
+        const double dt = std::fabs((now - cached_via_points_stamp_).toSec());
+        if (dt < via_points_hold_time_)
+        {
+            nav_msgs::Path held = cached_via_points_;
+            held.header.stamp = stamp;
+            for (auto& pose : held.poses)
+                pose.header = held.header;
+            via_points_pub_.publish(held);
+            publishViaPointMarkers(held);
+            via_points_active_ = !held.poses.empty();
+            return;
+        }
+    }
+
+    if (suppress_via_points_)
+    {
+        publishClearedViaPoints();
+        return;
+    }
+
+    std::vector<Point2D> planner_points;
+    planner_points.reserve(1);
+    appendZoneViaPoints(selectPreferredViaZone(geometry), &planner_points);
+
+    if (has_robot_pose_ && !planner_points.empty())
+    {
+        if (isGoalCloserThanViaPoint(planner_points.front()))
+        {
+            publishClearedViaPoints();
+            return;
+        }
+
+        if (isViaPointReached(planner_points.front()))
+        {
+            suppress_via_points_ = true;
+            suppress_motion_dir_ = geometry.dir;
+            has_suppress_motion_dir_ = true;
+            publishClearedViaPoints();
+            return;
+        }
+    }
+
+    if (planner_points.empty())
+    {
+        publishClearedViaPoints();
+        return;
+    }
+
+    const nav_msgs::Path path = buildPathFromPoints(planner_points);
+    const nav_msgs::Path marker_path = buildPathFromPoints(buildViaPoints(geometry));
+
+    cached_via_points_ = path;
+    cached_via_points_stamp_ = now;
+    has_cached_via_points_ = true;
+    via_points_pub_.publish(path);
+    publishViaPointMarkers(marker_path);
+    via_points_active_ = !path.poses.empty();
+}
+
+/* ──────── Visualization ──────── */
 
 void PredictedSweepRiskLayer::publishVisualization()
 {
@@ -843,259 +1042,11 @@ void PredictedSweepRiskLayer::clearVisualization()
     if (!publish_visualization_ || !marker_pub_ || !visualization_active_)
         return;
 
-    const std::string frame_id = !latest_path_.header.frame_id.empty()
-        ? latest_path_.header.frame_id
-        : (!latest_pose_.header.frame_id.empty() ? latest_pose_.header.frame_id : layered_costmap_->getGlobalFrameID());
-    const ros::Time stamp = ros::Time::now();
-
+    const std::string frame_id = resolveFrameId();
     for (int id = 0; id < 5; ++id)
-    {
-        visualization_msgs::Marker marker;
-        marker.header.stamp = stamp;
-        marker.header.frame_id = frame_id;
-        marker.ns = "predicted_sweep_safe_zone";
-        marker.id = id;
-        marker.action = visualization_msgs::Marker::DELETE;
-        marker_pub_.publish(marker);
-    }
+        deleteMarker(marker_pub_, "predicted_sweep_safe_zone", id, frame_id);
 
     visualization_active_ = false;
-}
-
-void PredictedSweepRiskLayer::publishViaPoints(const SweepGeometry& geometry)
-{
-    if (!publish_via_points_ || !via_points_pub_)
-        return;
-
-    const ros::Time now = ros::Time::now();
-    const ros::Time stamp = !latest_path_.header.stamp.isZero() ? latest_path_.header.stamp : now;
-    const std::string frame_id = !latest_path_.header.frame_id.empty()
-        ? latest_path_.header.frame_id
-        : layered_costmap_->getGlobalFrameID();
-    auto buildPathFromPoints = [&](const std::vector<Point2D>& points)
-    {
-        nav_msgs::Path path;
-        path.header.stamp = stamp;
-        path.header.frame_id = frame_id;
-
-        for (const Point2D& point : points)
-        {
-            geometry_msgs::PoseStamped pose;
-            pose.header = path.header;
-            pose.pose.orientation.w = 1.0;
-            pose.pose.position.x = point.x;
-            pose.pose.position.y = point.y;
-            pose.pose.position.z = 0.0;
-            path.poses.push_back(pose);
-        }
-
-        return path;
-    };
-
-    auto publishClearedViaPoints = [&]()
-    {
-        cached_via_points_ = buildPathFromPoints({});
-        cached_via_points_stamp_ = now;
-        has_cached_via_points_ = false;
-        via_points_pub_.publish(cached_via_points_);
-        publishViaPointMarkers(cached_via_points_);
-        via_points_active_ = false;
-    };
-
-    if (!has_path_ || latest_path_.poses.empty())
-    {
-        suppress_via_points_ = false;
-        has_suppress_motion_dir_ = false;
-        publishClearedViaPoints();
-        return;
-    }
-
-    if (isMainGoalReached())
-    {
-        suppress_via_points_ = false;
-        has_suppress_motion_dir_ = false;
-        publishClearedViaPoints();
-        return;
-    }
-
-    // Direction-flip reset: ked sa os pohybu prekazky otocila o viac ako
-    // 90 stupnov oproti smeru, pri ktorom sme sticky flag nastavili, notion
-    // "za prekazkou" sa prevratil. Sticky z predosleho smeru uz nie je
-    // platny (typicky oscilujuca prekazka). Zhasneme flag, nech sa dole
-    // re-evaluate na aktualnej geometrii.
-    if (suppress_via_points_ && has_suppress_motion_dir_)
-    {
-        const double dot = geometry.dir.x * suppress_motion_dir_.x
-                         + geometry.dir.y * suppress_motion_dir_.y;
-        if (dot < 0.0)
-        {
-            suppress_via_points_ = false;
-            has_suppress_motion_dir_ = false;
-        }
-    }
-
-    // Primarny terminator wake-chasingu: ked robot projekcne prejde za
-    // rovinu prekazky (rearProgress >= obstacle_radius + handoff margin),
-    // via-point uz pre tuto epizodu nic nerieši — zhasneme ho natrvalo.
-    // Sticky flag sa zresetuje pri: skonceni trackingu (prazdna path),
-    // dosahnuti hlavneho cielu, alebo ked sa motion direction otoci >90°.
-    if (hasRobotBypassedObstacle(geometry))
-    {
-        suppress_via_points_ = true;
-        suppress_motion_dir_ = geometry.dir;
-        has_suppress_motion_dir_ = true;
-        publishClearedViaPoints();
-        return;
-    }
-
-    if (has_cached_via_points_ && !cached_via_points_stamp_.isZero())
-    {
-        if (!cached_via_points_.poses.empty())
-        {
-            const auto& pose = cached_via_points_.poses.front().pose.position;
-            const Point2D cached_via_point{pose.x, pose.y};
-            if (isGoalCloserThanViaPoint(cached_via_point))
-            {
-                publishClearedViaPoints();
-                return;
-            }
-
-            if (isViaPointReached(cached_via_point))
-            {
-                suppress_via_points_ = true;
-                suppress_motion_dir_ = geometry.dir;
-                has_suppress_motion_dir_ = true;
-                publishClearedViaPoints();
-                return;
-            }
-        }
-
-        const double dt = std::fabs((now - cached_via_points_stamp_).toSec());
-        if (dt < via_points_hold_time_)
-        {
-            nav_msgs::Path held = cached_via_points_;
-            held.header.stamp = stamp;
-            for (auto& pose : held.poses)
-                pose.header = held.header;
-            via_points_pub_.publish(held);
-            publishViaPointMarkers(held);
-            via_points_active_ = !held.poses.empty();
-            return;
-        }
-    }
-
-    std::vector<Point2D> planner_points;
-    planner_points.reserve(1);
-
-    if (suppress_via_points_)
-    {
-        publishClearedViaPoints();
-        return;
-    }
-
-    appendZoneViaPoints(selectPreferredViaZone(geometry), &planner_points);
-
-    if (has_robot_pose_ && !planner_points.empty())
-    {
-        const Point2D& target = planner_points.front();
-        if (isGoalCloserThanViaPoint(target))
-        {
-            publishClearedViaPoints();
-            return;
-        }
-    }
-
-    if (!planner_points.empty())
-    {
-        const Point2D& target = planner_points.front();
-        if (isViaPointReached(target))
-        {
-            suppress_via_points_ = true;
-            suppress_motion_dir_ = geometry.dir;
-            has_suppress_motion_dir_ = true;
-            publishClearedViaPoints();
-            return;
-        }
-    }
-
-    if (planner_points.empty())
-    {
-        publishClearedViaPoints();
-        return;
-    }
-
-    const nav_msgs::Path path = buildPathFromPoints(planner_points);
-    const nav_msgs::Path marker_path = buildPathFromPoints(buildViaPoints(geometry));
-
-    cached_via_points_ = path;
-    cached_via_points_stamp_ = now;
-    has_cached_via_points_ = true;
-    via_points_pub_.publish(path);
-    publishViaPointMarkers(marker_path);
-    via_points_active_ = !path.poses.empty();
-}
-
-bool PredictedSweepRiskLayer::isMainGoalReached() const
-{
-    if (!has_robot_pose_ || !has_path_ || latest_path_.poses.empty())
-        return false;
-
-    const auto& goal_pose = latest_path_.poses.back().pose.position;
-    const double goal_dist = distance2d(last_robot_pose_.x, last_robot_pose_.y, goal_pose.x, goal_pose.y);
-    return goal_dist <= goal_reached_distance_;
-}
-
-bool PredictedSweepRiskLayer::isViaPointReached(const Point2D& via_point) const
-{
-    if (!has_robot_pose_)
-        return false;
-
-    const double via_dist = distance2d(last_robot_pose_.x, last_robot_pose_.y, via_point.x, via_point.y);
-    return via_dist <= via_point_reached_distance_;
-}
-
-double PredictedSweepRiskLayer::rearProgress(const SweepGeometry& geometry) const
-{
-    if (!has_robot_pose_)
-        return -std::numeric_limits<double>::infinity();
-
-    const double dx = last_robot_pose_.x - geometry.start.x;
-    const double dy = last_robot_pose_.y - geometry.start.y;
-    return dx * (-geometry.dir.x) + dy * (-geometry.dir.y);
-}
-
-bool PredictedSweepRiskLayer::hasRobotBypassedObstacle(const SweepGeometry& geometry) const
-{
-    if (!has_robot_pose_)
-        return false;
-
-    return rearProgress(geometry) >= (obstacle_radius_ + bypass_handoff_distance_);
-}
-
-bool PredictedSweepRiskLayer::isGoalCloserThanViaPoint(const Point2D& via_point) const
-{
-    if (!has_robot_pose_ || !has_path_ || latest_path_.poses.empty())
-        return false;
-
-    const auto& goal_pose = latest_path_.poses.back().pose.position;
-    const double goal_dist = distance2d(last_robot_pose_.x, last_robot_pose_.y, goal_pose.x, goal_pose.y);
-    const double via_dist = distance2d(last_robot_pose_.x, last_robot_pose_.y, via_point.x, via_point.y);
-    return goal_dist < via_dist;
-}
-
-void PredictedSweepRiskLayer::clearViaPoints()
-{
-    if (!publish_via_points_ || !via_points_pub_)
-        return;
-
-    nav_msgs::Path path;
-    path.header.stamp = ros::Time::now();
-    path.header.frame_id = !latest_path_.header.frame_id.empty()
-        ? latest_path_.header.frame_id
-        : (!latest_pose_.header.frame_id.empty() ? latest_pose_.header.frame_id : layered_costmap_->getGlobalFrameID());
-    via_points_pub_.publish(path);
-    via_points_active_ = false;
-    has_cached_via_points_ = false;
 }
 
 void PredictedSweepRiskLayer::publishViaPointMarkers(const nav_msgs::Path& path)
@@ -1137,11 +1088,10 @@ void PredictedSweepRiskLayer::publishViaPointMarkers(const nav_msgs::Path& path)
     const std::size_t split_index = std::min<std::size_t>(3, path.poses.size());
     for (std::size_t i = 0; i < path.poses.size(); ++i)
     {
-        const auto& pose = path.poses[i];
         geometry_msgs::Point p;
-        p.x = pose.pose.position.x;
-        p.y = pose.pose.position.y;
-        p.z = pose.pose.position.z + 0.05;
+        p.x = path.poses[i].pose.position.x;
+        p.y = path.poses[i].pose.position.y;
+        p.z = path.poses[i].pose.position.z + 0.05;
         points_marker.points.push_back(p);
 
         if (i < split_index)
@@ -1158,87 +1108,29 @@ void PredictedSweepRiskLayer::publishViaPointMarkers(const nav_msgs::Path& path)
     via_points_marker_active_ = !path.poses.empty();
 }
 
+void PredictedSweepRiskLayer::clearViaPoints()
+{
+    if (!publish_via_points_ || !via_points_pub_)
+        return;
+
+    nav_msgs::Path path;
+    path.header.stamp = ros::Time::now();
+    path.header.frame_id = resolveFrameId();
+    via_points_pub_.publish(path);
+    via_points_active_ = false;
+    has_cached_via_points_ = false;
+}
+
 void PredictedSweepRiskLayer::clearViaPointMarkers()
 {
     if (!via_points_marker_pub_ || !via_points_marker_active_)
         return;
 
-    const std::string frame_id = !latest_path_.header.frame_id.empty()
-        ? latest_path_.header.frame_id
-        : (!latest_pose_.header.frame_id.empty() ? latest_pose_.header.frame_id : layered_costmap_->getGlobalFrameID());
-
+    const std::string frame_id = resolveFrameId();
     for (int id = 0; id < 3; ++id)
-    {
-        visualization_msgs::Marker marker;
-        marker.header.stamp = ros::Time::now();
-        marker.header.frame_id = frame_id;
-        marker.ns = "predicted_sweep_via_points";
-        marker.id = id;
-        marker.action = visualization_msgs::Marker::DELETE;
-        via_points_marker_pub_.publish(marker);
-    }
+        deleteMarker(via_points_marker_pub_, "predicted_sweep_via_points", id, frame_id);
 
     via_points_marker_active_ = false;
-}
-
-void PredictedSweepRiskLayer::updateCosts(costmap_2d::Costmap2D& master_grid,
-                                          int min_i, int min_j, int max_i, int max_j)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    if (isMainGoalReached())
-    {
-        suppress_via_points_ = false;
-        has_suppress_motion_dir_ = false;
-        has_cached_via_points_ = false;
-        cached_via_points_.poses.clear();
-        cached_via_points_stamp_ = ros::Time();
-    }
-
-    if (!enabled_ || !hasUsableGeometry())
-    {
-        clearVisualization();
-        clearViaPoints();
-        clearViaPointMarkers();
-        return;
-    }
-
-    SweepGeometry geometry;
-    if (!buildSweepGeometry(geometry))
-    {
-        clearVisualization();
-        clearViaPoints();
-        clearViaPointMarkers();
-        return;
-    }
-
-    publishVisualization();
-    publishViaPoints(geometry);
-
-    if (!apply_costs_)
-        return;
-
-    for (int j = min_j; j < max_j; ++j)
-    {
-        for (int i = min_i; i < max_i; ++i)
-        {
-            double wx, wy;
-            master_grid.mapToWorld(i, j, wx, wy);
-
-            unsigned char risk_cost = computeCostAt(wx, wy, &geometry);
-            if (risk_cost == costmap_2d::FREE_SPACE)
-                continue;
-
-            unsigned char old_cost = master_grid.getCost(i, j);
-
-            if (old_cost == costmap_2d::NO_INFORMATION)
-                master_grid.setCost(i, j, risk_cost);
-            else
-                master_grid.setCost(i, j, std::max(old_cost, risk_cost));
-        }
-    }
-
-    applyPathTubeCosts(master_grid);
 }
 
 }  // namespace mrvk_gazebo

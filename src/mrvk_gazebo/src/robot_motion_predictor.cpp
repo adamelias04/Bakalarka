@@ -90,13 +90,8 @@ public:
     // casovych krokoch).
     private_nh_.param("temporal_safety_distance", temporal_safety_distance_, 0.48);
     private_nh_.param("temporal_path_max_age",    temporal_path_max_age_,    1.0);
-    private_nh_.param("speedup_max_scale",        speedup_max_scale_,        1.6);
-    private_nh_.param("slow_min_scale",           slow_min_scale_,           0.2);
-    private_nh_.param("scan_scale_steps",         scan_scale_steps_,         8);
-    private_nh_.param("max_vel_x_cap",            max_vel_x_cap_,            1.5);
     private_nh_.param("obstacle_prediction_dt",   obstacle_prediction_dt_,   0.1);
     private_nh_.param("temporal_prediction_time", temporal_prediction_time_, 3.0);
-    private_nh_.param("temporal_reverse_velocity", temporal_reverse_velocity_, -0.5);
 
     if (prediction_dt_ < 1e-3)
       prediction_dt_ = 1e-3;
@@ -308,18 +303,15 @@ private:
 
     // ---- Temporal overlap layer ---------------------------------------
     //
-    // Statickym checkom (cellLethal cez horizont) sme uz dolaadovali
-    // 'out' twist. Teraz overime, ci sa robotova trajektoria pri tomto
-    // upravenom 'out' nestreta s predikciou pohyblivej prekazky v
-    // rovnakych casovych krokoch. Ak ano, skusame v poradi:
+    // Porovnava robotovu predikciu s predikciou prekazky v rovnakych
+    // casovych krokoch. Klasifikuje konflikt:
     //
-    //   1) SPEEDUP scan  (preferovane)  -> TEMPORAL_BOOST
-    //   2) SLOW scan     (fallback)     -> TEMPORAL_SLOW
-    //   3) STOP                           -> TEMPORAL_STOP
-    //   4) REVERSE (ak je tyl volny)    -> TEMPORAL_REVERSE
-    //
-    // Statickym checkom prefixujeme aj kazdy SPEEDUP kandidat (nezvysujeme
-    // rychlost do statickej steny).
+    //   CROSSING  — zastavenie riesi konflikt (prekazka pretina cestu)
+    //               -> TEMPORAL_STOP (v=0, angular zachovane pre TEB)
+    //   HEAD-ON   — zastavenie neriesi (prekazka ide na nas)
+    //               -> prepustime TEB cmd_vel — PredictedSweepRiskLayer
+    //                  + costmap costs + via-points nech TEB uhne do strany,
+    //                  staticky safety layer (SLOW/STOP/REVERSE) je poistka.
     nav_msgs::Path obs_path_local;
     bool have_obs_path_local = false;
     {
@@ -339,100 +331,26 @@ private:
       if (tc.present)
       {
         const char* tmode = nullptr;
-        const double v_base = std::fabs(v_cmd) > 1e-6 ? v_cmd : out.linear.x;
 
-        // 1) SPEEDUP scan (1.0 -> speedup_max_scale_)
-        if (v_base > 0.0 && scan_scale_steps_ >= 1)
+        // Klasifikacia: zastavenie riesi konflikt?
+        const TemporalConflict tc_stop =
+            checkTemporalConflict(odom, obs_path_local, 0.0, 0.0);
+
+        if (!tc_stop.present)
         {
-          const double s_lo = 1.0;
-          const double s_hi = speedup_max_scale_;
-          for (int s = 1; s <= scan_scale_steps_; ++s)
-          {
-            const double t = static_cast<double>(s) / static_cast<double>(scan_scale_steps_);
-            const double scale = s_lo + (s_hi - s_lo) * t;
-            const double v_try = scale * v_base;
-            if (std::fabs(v_try) > max_vel_x_cap_)
-              continue;
-
-            // Speedup nesmie viest do statickej steny.
-            const PredictionResult check_static =
-                runPrediction(odom, costmap, v_try, w_cmd);
-            if (check_static.t_collision >= 0.0)
-              continue;
-
-            const TemporalConflict tc2 =
-                checkTemporalConflict(odom, obs_path_local, v_try, w_cmd);
-            if (!tc2.present)
-            {
-              out.linear.x = v_try;
-              tmode = "TEMPORAL_BOOST";
-              break;
-            }
-          }
-        }
-
-        // 2) SLOW scan (1.0 -> slow_min_scale_, zostupne)
-        if (!tmode && scan_scale_steps_ >= 1)
-        {
-          const double s_lo = 1.0;
-          const double s_hi = slow_min_scale_;
-          for (int s = 1; s <= scan_scale_steps_; ++s)
-          {
-            const double t = static_cast<double>(s) / static_cast<double>(scan_scale_steps_);
-            const double scale = s_lo + (s_hi - s_lo) * t;
-            const double v_try = scale * v_base;
-            const TemporalConflict tc2 =
-                checkTemporalConflict(odom, obs_path_local, v_try, w_cmd);
-            if (!tc2.present)
-            {
-              out.linear.x = v_try;
-              out.linear.y = msg->linear.y * scale;
-              tmode = "TEMPORAL_SLOW";
-              break;
-            }
-          }
-        }
-
-        // 3) STOP — ale len ak zastavenie naozaj riesi konflikt
-        //    (prekazka neprichadza priamo na nas). Overime cez
-        //    checkTemporalConflict s v=0.
-        if (!tmode)
-        {
-          const TemporalConflict tc_stop =
-              checkTemporalConflict(odom, obs_path_local, 0.0, 0.0);
-          if (!tc_stop.present)
-          {
-            out.linear.x = 0.0;
-            out.linear.y = 0.0;
-            tmode = "TEMPORAL_STOP";
-          }
-        }
-
-        // 4) REVERSE — prekazka ide priamo na nas (zastavenie nepomoze),
-        //    cuvneme okamzite agresivnejsie nez bezny reverse (0.5 m/s
-        //    default). Guard msg->linear.x > 0 je zruseny — TEB casto
-        //    posle v=0 lebo sam vidi obstacle v costmape, ale temporal
-        //    REVERSE musi fungovat aj vtedy.
-        if (!tmode)
-        {
-          const Point2D p0{odom.pose.pose.position.x, odom.pose.pose.position.y};
-          const double yaw0 = yawFromQuaternion(odom.pose.pose.orientation);
-          if (isRearClear(costmap, p0, yaw0))
-          {
-            out.linear.x  = temporal_reverse_velocity_;
-            out.linear.y  = 0.0;
-            out.angular.z = 0.0;
-            tmode = "TEMPORAL_REVERSE";
-          }
-        }
-
-        // 5) STOP fallback — ziadny manevor nepomaha (tyl blokovany),
-        //    posledna moznost.
-        if (!tmode)
-        {
+          // CROSSING — prekazka pretina cestu, zastavenie staci.
+          // Angular zachovame, nech TEB moze rotovat.
           out.linear.x = 0.0;
           out.linear.y = 0.0;
           tmode = "TEMPORAL_STOP";
+        }
+        else
+        {
+          // HEAD-ON — prekazka ide priamo na nas, zastavenie neriesi.
+          // Prepustime TEB-ov cmd_vel bez zmeny — PredictedSweepRiskLayer
+          // uz stampla costs na obstacle path a via-points naviguju TEB
+          // do bezpecnej zony. Staticky safety layer je poistka.
+          tmode = "TEMPORAL_HEADON";
         }
 
         ROS_WARN_THROTTLE(1.0,
@@ -797,13 +715,8 @@ private:
   // Temporal overlap parametre
   double temporal_safety_distance_;
   double temporal_path_max_age_;
-  double speedup_max_scale_;
-  double slow_min_scale_;
-  int    scan_scale_steps_;
-  double max_vel_x_cap_;
   double obstacle_prediction_dt_;
   double temporal_prediction_time_;
-  double temporal_reverse_velocity_;
 };
 
 }  // namespace

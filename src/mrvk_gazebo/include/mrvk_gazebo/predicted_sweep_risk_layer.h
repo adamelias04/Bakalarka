@@ -49,6 +49,9 @@ private:
         double length;
     };
 
+    void loadParams(ros::NodeHandle& nh);
+    void setupIO(ros::NodeHandle& nh);
+
     void pathCallback(const nav_msgs::Path::ConstPtr& msg);
     void poseCallback(const geometry_msgs::PoseStamped::ConstPtr& msg);
 
@@ -75,9 +78,6 @@ private:
                                   double x0, double y0,
                                   double x1, double y1) const;
     unsigned char computePathTubeCostAt(double wx, double wy) const;
-    unsigned char computeZoneCostAt(double wx, double wy,
-                                    const SweepGeometry& geometry,
-                                    const ZoneGeometry& zone) const;
     unsigned char computeMiddleZoneCostAt(double wx, double wy,
                                           const SweepGeometry& geometry,
                                           const ZoneGeometry& zone) const;
@@ -97,6 +97,13 @@ private:
     double clamp01(double v) const;
     double norm2d(double x, double y) const;
     double distance2d(double x0, double y0, double x1, double y1) const;
+    std::string resolveFrameId() const;
+    ros::Time referenceStamp() const;
+    void clearAllOverlays();
+    void expandBounds(double* min_x, double* min_y, double* max_x, double* max_y,
+                      double px, double py, double pad) const;
+    void deleteMarker(ros::Publisher& pub, const std::string& ns,
+                      int id, const std::string& frame_id) const;
 
     std::mutex mutex_;
 

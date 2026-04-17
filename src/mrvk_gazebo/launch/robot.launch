@@ -7,10 +7,10 @@
 
     <arg name="world_file" default="$(find mrvk_gazebo)/worlds/empty.world"/>
 
-    <arg name="init_x" default="3"/>
-    <arg name="init_y" default="0"/>
+    <arg name="init_x" default="0"/>
+    <arg name="init_y" default="6"/>
     <arg name="init_z" default="0.3"/>
-    <arg name="init_yaw" default="3.14"/>
+    <arg name="init_yaw" default="-1.57"/>
 
     <include file="$(find mrvk_gazebo)/launch/gazebo.launch">
         <arg name="model" value="$(arg model)"/>
@@ -33,7 +33,7 @@
         <param name="scan_topic" value="$(arg laser_topic)"/>
         <param name="output_frame" value="odom"/>
 
-        <param name="prediction_time" value="3"/>
+        <param name="prediction_time" value="3.75"/>
         <param name="prediction_dt" value="0.1"/>
 
         <param name="alpha_gain" value="0.65"/>
@@ -109,7 +109,7 @@
         <param name="prediction_path_topic" value="/robot_motion_prediction"/>
         <param name="prediction_marker_topic" value="/robot_motion_prediction_marker"/>
 
-        <param name="prediction_time" value="1.5"/>
+        <param name="prediction_time" value="2.0"/>
         <param name="viz_rate" value="20.0"/>
         <param name="marker_line_width" value="0.05"/>
         <param name="marker_z" value="0.10"/>
@@ -125,17 +125,12 @@
         <!-- Temporal overlap test proti /predicted_obstacle_path z
              dynamic_obstacle_predictor: porovnava robotovu predikciu
              a obstacle predikciu v rovnakych casovych krokoch a
-             rozhoduje SPEEDUP / SLOW / STOP / REVERSE. -->
+             rozhoduje CROSSING (STOP) / HEAD-ON (passthrough pre TEB). -->
         <param name="obstacle_path_topic" value="/predicted_obstacle_path"/>
         <param name="obstacle_prediction_dt" value="0.1"/>
         <param name="temporal_safety_distance" value="0.48"/>
         <param name="temporal_path_max_age" value="1.0"/>
-        <param name="speedup_max_scale" value="1.6"/>
-        <param name="slow_min_scale" value="0.2"/>
-        <param name="scan_scale_steps" value="8"/>
-        <param name="max_vel_x_cap" value="1.0"/>
         <param name="temporal_prediction_time" value="3.0"/>
-        <param name="temporal_reverse_velocity" value="-0.5"/>
     </node>
 
     <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">

@@ -39,7 +39,7 @@ predicted_sweep_risk_layer:
   via_points_topic: /move_base/TebLocalPlannerROS/via_points
   via_points_marker_topic: /predicted_sweep_via_points
 
-  corridor_half_width: 0.45
+  corridor_half_width: 0.8
   side_extra_width: 0.30
   obstacle_radius: 0.22
   max_path_length: 2.0
@@ -51,7 +51,7 @@ predicted_sweep_risk_layer:
   visualization_clearance: 0.55
   rear_zone_length_scale: 2.25
   front_zone_length_scale: 1.0
-  predicted_path_half_width: 0.32
+  predicted_path_half_width: 0.8
   low_speed_hold_time: 0.8
   min_fallback_length: 1.0
   geometry_hold_time: 1.0
@@ -81,7 +81,7 @@ predicted_sweep_risk_layer:
 
 inflation_layer:
   enabled: true
-  inflation_radius: 0.2
+  inflation_radius: 0.6
   cost_scaling_factor: 2.5
 
 obstacle_range: 3.4
