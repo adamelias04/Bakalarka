@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -93,6 +95,13 @@ public:
     private_nh_.param("obstacle_prediction_dt",   obstacle_prediction_dt_,   0.1);
     private_nh_.param("temporal_prediction_time", temporal_prediction_time_, 3.0);
 
+    // Escape mode: ak je robot pozicia v lethal bunke, vyhodnotime niekolko
+    // kandidatov (v, w) a vyberieme ten, ktory najrychlejsie opusta lethal
+    // zonu a drzi bezpecnu vzdialenost od obstacle prediction.
+    private_nh_.param("escape_horizon",          escape_horizon_,          1.5);
+    private_nh_.param("escape_linear_velocity",  escape_v_,                0.25);
+    private_nh_.param("escape_angular_velocity", escape_w_,                0.6);
+
     if (prediction_dt_ < 1e-3)
       prediction_dt_ = 1e-3;
     if (prediction_time_ < prediction_dt_)
@@ -155,6 +164,21 @@ private:
   {
     nav_msgs::Path path;
     double t_collision;  // -1 ak ziadna kolizia v horizonte
+  };
+
+  // Escape: kandidat manevru + skorovaci vysledok.
+  struct EscapeCandidate
+  {
+    double v;
+    double w;
+    const char* name;
+  };
+
+  struct EscapeScore
+  {
+    bool feasible = false;           // existuje krok, kde sme mimo lethal
+    double t_exit = 0.0;             // sekundy do vystupu z lethal zony
+    double min_obs_dist = std::numeric_limits<double>::infinity();
   };
 
   PredictionResult runPrediction(const nav_msgs::Odometry& odom,
@@ -228,6 +252,52 @@ private:
     // Bez state proste prepustime — nemozeme spravne rozhodnut.
     if (!have_state)
     {
+      cmd_pub_.publish(out);
+      return;
+    }
+
+    // ---- Lethal escape mode ---------------------------------------------
+    //
+    // Ak je robot pozicia v lethal bunke, TEB vystup nestaci — aktivne
+    // vyberieme escape manever (dopredu / dozadu / rotacia / kombinacia)
+    // podla toho, ktory najrychlejsie unika a ktora trajektoria sa
+    // najmenej blizi k predikcii prekazky.
+    if (cellLethal(costmap, odom.pose.pose.position.x, odom.pose.pose.position.y))
+    {
+      nav_msgs::Path obs_path_local;
+      const nav_msgs::Path* obs_ptr = nullptr;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (has_obstacle_path_)
+        {
+          obs_path_local = latest_obstacle_path_;
+          obs_ptr = &obs_path_local;
+        }
+      }
+
+      geometry_msgs::Twist esc;
+      const char* esc_mode = nullptr;
+      std::string esc_scores;
+      if (selectEscape(odom, costmap, obs_ptr, esc, esc_mode, esc_scores))
+      {
+        ROS_WARN_THROTTLE(1.0,
+                          "RobotMotionPredictor: LETHAL_ESCAPE picked=%s (v=%.2f w=%.2f) "
+                          "(cmd v=%.2f w=%.2f) scores:%s",
+                          esc_mode, esc.linear.x, esc.angular.z,
+                          msg->linear.x, msg->angular.z,
+                          esc_scores.c_str());
+        cmd_pub_.publish(esc);
+        return;
+      }
+
+      ROS_WARN_THROTTLE(1.0,
+                        "RobotMotionPredictor: LETHAL_NO_ESCAPE (hardstop, "
+                        "cmd v=%.2f w=%.2f) scores:%s",
+                        msg->linear.x, msg->angular.z,
+                        esc_scores.c_str());
+      out.linear.x = 0.0;
+      out.linear.y = 0.0;
+      out.angular.z = 0.0;
       cmd_pub_.publish(out);
       return;
     }
@@ -630,6 +700,131 @@ private:
     return tc;
   }
 
+  // ---- Lethal escape mode ------------------------------------------------
+  //
+  // Aktivuje sa ked robot pozicia padne do lethal bunky. Simuluje niekolko
+  // kandidatov (v, w), vypocita najskorsi cas vystupu z lethal zony a
+  // (ak mame obstacle prediction) aj minimalnu vzdialenost od obstacle
+  // predikcie v temporalne zarovnanych krokoch. Vyberie kandidata, ktory
+  // najskor unika, s penalizaciou ak sa blizi k prekazke.
+  EscapeScore evaluateEscape(const nav_msgs::Odometry& odom,
+                              const nav_msgs::OccupancyGrid& cm,
+                              const nav_msgs::Path* obs_path,
+                              double v, double w) const
+  {
+    EscapeScore s;
+
+    const double yaw0 = yawFromQuaternion(odom.pose.pose.orientation);
+    double cx = odom.pose.pose.position.x;
+    double cy = odom.pose.pose.position.y;
+    double cyaw = yaw0;
+
+    const int n_steps = static_cast<int>(std::ceil(escape_horizon_ / prediction_dt_));
+
+    double obs_age = 0.0;
+    int n_obs = 0;
+    bool obs_valid = false;
+    if (obs_path != nullptr && !obs_path->poses.empty())
+    {
+      obs_age = (ros::Time::now() - obs_path->header.stamp).toSec();
+      n_obs = static_cast<int>(obs_path->poses.size());
+      obs_valid = (obs_age <= temporal_path_max_age_);
+    }
+
+    for (int i = 1; i <= n_steps; ++i)
+    {
+      cyaw += w * prediction_dt_;
+      cx   += v * std::cos(cyaw) * prediction_dt_;
+      cy   += v * std::sin(cyaw) * prediction_dt_;
+
+      if (!s.feasible && !cellLethal(cm, cx, cy))
+      {
+        s.feasible = true;
+        s.t_exit = static_cast<double>(i) * prediction_dt_;
+      }
+
+      if (obs_valid)
+      {
+        const double t_abs = obs_age + static_cast<double>(i) * prediction_dt_;
+        int k = static_cast<int>(std::round(t_abs / obstacle_prediction_dt_));
+        if (k >= 0 && k < n_obs)
+        {
+          const auto& op = obs_path->poses[k].pose.position;
+          const double d = std::hypot(cx - op.x, cy - op.y);
+          s.min_obs_dist = std::min(s.min_obs_dist, d);
+        }
+      }
+    }
+    return s;
+  }
+
+  bool selectEscape(const nav_msgs::Odometry& odom,
+                    const nav_msgs::OccupancyGrid& cm,
+                    const nav_msgs::Path* obs_path,
+                    geometry_msgs::Twist& out,
+                    const char*& mode_out,
+                    std::string& scores_out) const
+  {
+    const EscapeCandidate candidates[] = {
+        { +escape_v_,  0.0,          "ESC_FWD"   },
+        { -escape_v_,  0.0,          "ESC_REV"   },
+        { +escape_v_, +escape_w_,    "ESC_FWD_L" },
+        { +escape_v_, -escape_w_,    "ESC_FWD_R" },
+        { -escape_v_, +escape_w_,    "ESC_REV_L" },
+        { -escape_v_, -escape_w_,    "ESC_REV_R" },
+        {  0.0,       +escape_w_,    "ESC_ROT_L" },
+        {  0.0,       -escape_w_,    "ESC_ROT_R" },
+    };
+
+    int best_idx = -1;
+    double best_score = std::numeric_limits<double>::infinity();
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2);
+
+    for (std::size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i)
+    {
+      const EscapeScore s = evaluateEscape(odom, cm, obs_path,
+                                           candidates[i].v, candidates[i].w);
+
+      oss << " " << candidates[i].name << "[";
+      if (!s.feasible) {
+        oss << "BLOCKED]";
+        continue;
+      }
+
+      // Skor: nizsi t_exit je lepsi; kandidat, ktorym v temporalnom
+      // matchingu preprvavame prekazku do bezpecnej vzdialenosti, dostane
+      // vysoku penalizaciu (nechceme vbehnut priamo pod kocku).
+      double score = s.t_exit;
+      const bool penalized = (s.min_obs_dist < temporal_safety_distance_);
+      if (penalized)
+        score += 10.0;
+
+      oss << "t=" << s.t_exit
+          << " d=" << (std::isfinite(s.min_obs_dist) ? s.min_obs_dist : -1.0)
+          << " s=" << score
+          << (penalized ? " !" : "")
+          << "]";
+
+      if (score < best_score)
+      {
+        best_score = score;
+        best_idx = static_cast<int>(i);
+      }
+    }
+
+    scores_out = oss.str();
+
+    if (best_idx < 0)
+      return false;
+
+    out.linear.x = candidates[best_idx].v;
+    out.linear.y = 0.0;
+    out.angular.z = candidates[best_idx].w;
+    mode_out = candidates[best_idx].name;
+    return true;
+  }
+
   bool isRearClear(const nav_msgs::OccupancyGrid& cm, const Point2D& base, double yaw) const
   {
     // Probe niekolko bodov za robotom (proti smeru yaw).
@@ -717,6 +912,11 @@ private:
   double temporal_path_max_age_;
   double obstacle_prediction_dt_;
   double temporal_prediction_time_;
+
+  // Escape mode
+  double escape_horizon_;
+  double escape_v_;
+  double escape_w_;
 };
 
 }  // namespace

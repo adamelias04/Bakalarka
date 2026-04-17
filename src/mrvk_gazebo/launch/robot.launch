@@ -131,6 +131,13 @@
         <param name="temporal_safety_distance" value="0.48"/>
         <param name="temporal_path_max_age" value="1.0"/>
         <param name="temporal_prediction_time" value="3.0"/>
+
+        <!-- Lethal escape mode: ak je robot v lethal bunke, vyhodnoti 8
+             kandidatov (FWD / REV / FWD+rot / REV+rot / ROT) a vyberie ten,
+             ktory najrychlejsie unika a najmenej sa blizi k prekazke. -->
+        <param name="escape_horizon" value="1.5"/>
+        <param name="escape_linear_velocity" value="1.5"/>
+        <param name="escape_angular_velocity" value="0.6"/>
     </node>
 
     <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
