@@ -15,5 +15,4 @@ local_costmap:
 
   plugins:
     - {name: obstacles, type: "costmap_2d::ObstacleLayer"}
-    - {name: predicted_sweep_risk_layer, type: "mrvk_gazebo::PredictedSweepRiskLayer"}
     - {name: inflation_layer, type: "costmap_2d::InflationLayer"}

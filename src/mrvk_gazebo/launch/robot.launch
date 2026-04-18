@@ -138,6 +138,37 @@
         <param name="escape_horizon" value="1.5"/>
         <param name="escape_linear_velocity" value="1.5"/>
         <param name="escape_angular_velocity" value="0.6"/>
+
+        <!-- Head-on maneuver: pri TEMPORAL_HEADON je primarna strategia
+             REVERSE + TURN (cuvanie so zatacanim) — robot cuvne a sucasne
+             rotuje, cim sa vyhne head-on kurzu a TEB dokaze prekazku obist.
+             Fallback: cista reverze, potom forward swerve.
+             Vyber maximalizuje min vzdialenost od prekazky pocas headon_horizon.
+             Strana-lock hysteréza zabranuje preskakovaniu medzi L a R. -->
+        <!-- Hodnoty prisposobene realnemu wheel_accel (~0.23 m/s² na koleso):
+             vyssie targety kolesa nestihnu nabehnut za cas latch-u, takze
+             diferencial (=zatacanie) sa nikdy neprejavi. Nizsie targety
+             su fyzikalne dosiahnutelne v ramci latch okna. -->
+        <param name="headon_reverse_velocity" value="-1.1"/>
+        <param name="headon_swerve_angular" value="1.0"/>
+        <param name="headon_forward_velocity" value="1.0"/>
+        <param name="headon_horizon" value="1.2"/>
+        <!-- Hard lock + dlhsie okno + vacsi bonus: ked sa robot raz committne
+             do REV_L alebo REV_R, nekmita. Oba smery su symetricky bezpecne. -->
+        <param name="headon_side_lock_time" value="2.0"/>
+        <param name="headon_side_lock_bonus" value="0.25"/>
+        <param name="headon_hard_lock" value="true"/>
+        <!-- Permisivna feasibility: blokujeme iba ak prvych N krokov
+             (0.1*N sekund) arc-u je v lethal. Neskorsie lethal steps
+             neblokuju — dalsi tick reevaluuje s cerstvym costmapom. -->
+        <param name="headon_min_feasible_steps" value="2"/>
+
+        <!-- Command latch: HEADON/ESCAPE reverze sa zamkne na tento cas,
+             aby TEB (~10Hz forward=1.0) nestihol medzitym prepisat cmd
+             a robot reálne zreverzoval niekoľko decimetrov + zatocil.
+             Dlhsie okno je nutne pretoze pri wheel_accel=2.0 rad/s²
+             trva nabehnutie diferencialu aspon ~1.5-2s. -->
+        <param name="cmd_latch_time" value="1.9"/>
     </node>
 
     <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">

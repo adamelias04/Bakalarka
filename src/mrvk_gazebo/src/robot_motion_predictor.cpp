@@ -102,6 +102,27 @@ public:
     private_nh_.param("escape_linear_velocity",  escape_v_,                0.25);
     private_nh_.param("escape_angular_velocity", escape_w_,                0.6);
 
+    // Head-on maneuver: ak temporalna klasifikacia hovori HEAD-ON, namiesto
+    // passthrough porovname swerve-L/R + reverse a vyberieme kandidata,
+    // ktory MAXIMALIZUJE min_obs_dist cez horizon. Strana-lock hysteréza
+    // zabranuje ticavosti medzi L a R.
+    private_nh_.param("headon_forward_velocity", headon_v_,                0.25);
+    private_nh_.param("headon_swerve_angular",   headon_w_,                0.7);
+    private_nh_.param("headon_reverse_velocity", headon_rev_v_,           -0.25);
+    private_nh_.param("headon_horizon",          headon_horizon_,          2.0);
+    private_nh_.param("headon_side_lock_time",   headon_side_lock_time_,   2.0);
+    private_nh_.param("headon_side_lock_bonus",  headon_side_lock_bonus_,  0.25);
+    private_nh_.param("headon_hard_lock",        headon_hard_lock_,        true);
+    private_nh_.param("headon_min_feasible_steps", headon_min_feasible_steps_, 2);
+
+    // Command latch: ked HEADON alebo LETHAL_ESCAPE vyberie reverse
+    // maneuver, na dalsie ticky zamkneme ten cmd namiesto toho aby TEB
+    // (ktory posiela ~10Hz forward max) okamzite prepisal reverze. Inak
+    // robot necuva — zasiahne nas filter len raz za ~40 tickov a nestihne
+    // fyzicky zreverovat. Latch expires po cmd_latch_time_ alebo ked
+    // robot uz nie je v konflikte / lethal.
+    private_nh_.param("cmd_latch_time",            cmd_latch_time_,           0.6);
+
     if (prediction_dt_ < 1e-3)
       prediction_dt_ = 1e-3;
     if (prediction_time_ < prediction_dt_)
@@ -181,6 +202,23 @@ private:
     double min_obs_dist = std::numeric_limits<double>::infinity();
   };
 
+  // Head-on: kandidat (rovnaka semantika ako Escape) + skorovaci vysledok.
+  // Feasible znamena ze dratovany manever neprejde cez lethal bunku
+  // pocas headon_horizon_. Vyberame max(min_obs_dist).
+  struct HeadOnCandidate
+  {
+    double v;
+    double w;
+    int side;          // -1 = R, 0 = neutral, +1 = L (pre hysteresis)
+    const char* name;
+  };
+
+  struct HeadOnScore
+  {
+    bool feasible = false;
+    double min_obs_dist = std::numeric_limits<double>::infinity();
+  };
+
   PredictionResult runPrediction(const nav_msgs::Odometry& odom,
                                   const nav_msgs::OccupancyGrid& costmap,
                                   double v, double w) const
@@ -256,6 +294,27 @@ private:
       return;
     }
 
+    // ---- Command latch --------------------------------------------------
+    //
+    // Ak predchadzajuci tick zamol reverse maneuver (HEADON / ESCAPE),
+    // drzime ten cmd kym latch neexpiruje. Bez toho TEB (~10Hz, forward=1.0)
+    // kazdy druhy tick prepise reverze a robot sa fyzicky nepohne dozadu.
+    {
+      const ros::Time now_latch = ros::Time::now();
+      if (!cmd_latch_until_.isZero() && now_latch < cmd_latch_until_)
+      {
+        ROS_WARN_THROTTLE(1.0,
+                          "RobotMotionPredictor: %s LATCH hold (v=%.2f w=%.2f) "
+                          "remaining=%.2fs cmd=(v=%.2f w=%.2f)",
+                          cmd_latch_reason_.c_str(),
+                          cmd_latch_value_.linear.x, cmd_latch_value_.angular.z,
+                          (cmd_latch_until_ - now_latch).toSec(),
+                          msg->linear.x, msg->angular.z);
+        cmd_pub_.publish(cmd_latch_value_);
+        return;
+      }
+    }
+
     // ---- Lethal escape mode ---------------------------------------------
     //
     // Ak je robot pozicia v lethal bunke, TEB vystup nestaci — aktivne
@@ -286,6 +345,14 @@ private:
                           esc_mode, esc.linear.x, esc.angular.z,
                           msg->linear.x, msg->angular.z,
                           esc_scores.c_str());
+        // Zamkneme escape cmd aby TEB nestihol cez nasledujuce ticky
+        // prepisat forward — inak robot nestihne fyzicky reverovat.
+        if (esc.linear.x < 0.0)
+        {
+          cmd_latch_until_ = ros::Time::now() + ros::Duration(cmd_latch_time_);
+          cmd_latch_value_ = esc;
+          cmd_latch_reason_ = std::string("LETHAL_ESCAPE/") + esc_mode;
+        }
         cmd_pub_.publish(esc);
         return;
       }
@@ -398,7 +465,14 @@ private:
       const TemporalConflict tc =
           checkTemporalConflict(odom, obs_path_local, out.linear.x, out.angular.z);
 
-      if (tc.present)
+      // FOLLOWING skip: ak je prekazka pred robotom a ide priblizne rovnakym
+      // smerom ako robot (dot(obstacle_vel_dir, robot_heading) > 0), nejde o
+      // head-on ani crossing, ale o dobiehanie / predbiehanie. Temporal layer
+      // v takom pripade zbytocne robota stopuje (TEMPORAL_STOP) a blokuje
+      // TEB-u moznost obist cez via-points + costmap. Necame to na TEB.
+      const bool following = isFollowingScenario(odom, obs_path_local);
+
+      if (tc.present && !following)
       {
         const char* tmode = nullptr;
 
@@ -413,21 +487,55 @@ private:
           out.linear.x = 0.0;
           out.linear.y = 0.0;
           tmode = "TEMPORAL_STOP";
+
+          ROS_WARN_THROTTLE(1.0,
+                            "RobotMotionPredictor: %s (t_conflict=%.2fs dist=%.2fm "
+                            "cmd v=%.2f w=%.2f -> v=%.2f w=%.2f)",
+                            tmode, tc.t_conflict, tc.dist, v_cmd, w_cmd,
+                            out.linear.x, out.angular.z);
         }
         else
         {
-          // HEAD-ON — prekazka ide priamo na nas, zastavenie neriesi.
-          // Prepustime TEB-ov cmd_vel bez zmeny — PredictedSweepRiskLayer
-          // uz stampla costs na obstacle path a via-points naviguju TEB
-          // do bezpecnej zony. Staticky safety layer je poistka.
-          tmode = "TEMPORAL_HEADON";
-        }
+          // HEAD-ON — prekazka ide priamo na nas. Zastavenie neriesi,
+          // pasivny passthrough na TEB tiez nezvlada (closing rate je
+          // privysoka). Aktivne vyberieme swerve-L/R alebo reverse.
+          geometry_msgs::Twist hd;
+          const char* hd_mode = nullptr;
+          std::string hd_scores;
+          if (selectHeadOnManeuver(odom, costmap, obs_path_local,
+                                    hd, hd_mode, hd_scores))
+          {
+            out.linear.x = hd.linear.x;
+            out.linear.y = 0.0;
+            out.angular.z = hd.angular.z;
+            tmode = hd_mode;
+            // Zamkneme HEADON REV cmd — bez toho TEB (~10Hz forward=1.0)
+            // prepise reverze hned v dalsom ticku a robot nestihne
+            // zreverovat ani ~10cm. Latch drzi reverse cmd po cmd_latch_time_.
+            if (hd.linear.x < 0.0)
+            {
+              cmd_latch_until_ = ros::Time::now() + ros::Duration(cmd_latch_time_);
+              cmd_latch_value_ = hd;
+              cmd_latch_reason_ = std::string("HEADON/") + hd_mode;
+            }
+          }
+          else
+          {
+            // Ziadny kandidat nie je feasible (vsetky vedu do lethal) —
+            // hardstop, nech sa kocka prejde okolo nas.
+            out.linear.x = 0.0;
+            out.linear.y = 0.0;
+            out.angular.z = 0.0;
+            tmode = "TEMPORAL_HEADON_STUCK";
+          }
 
-        ROS_WARN_THROTTLE(1.0,
-                          "RobotMotionPredictor: %s (t_conflict=%.2fs dist=%.2fm "
-                          "cmd v=%.2f w=%.2f -> v=%.2f w=%.2f)",
-                          tmode, tc.t_conflict, tc.dist, v_cmd, w_cmd,
-                          out.linear.x, out.angular.z);
+          ROS_WARN_THROTTLE(1.0,
+                            "RobotMotionPredictor: %s (t_conflict=%.2fs dist=%.2fm "
+                            "cmd v=%.2f w=%.2f -> v=%.2f w=%.2f) scores:%s",
+                            tmode, tc.t_conflict, tc.dist, v_cmd, w_cmd,
+                            out.linear.x, out.angular.z,
+                            hd_scores.c_str());
+        }
       }
     }
 
@@ -627,6 +735,43 @@ private:
     return v >= lethal_threshold_;
   }
 
+  // Detekcia FOLLOW scenara: prekazka je vpredu v robotovom frame a ide
+  // priblizne rovnakym smerom ako robot hlavi. V takom pripade NIE JE
+  // head-on ani crossing — robot dobieha / ma prekazku obist. Temporal
+  // layer sa tu nesmie do toho montat, inak by TEMPORAL_STOP zastavil
+  // robota a TEB by nedokazal cez via-points ani obchadzat.
+  bool isFollowingScenario(const nav_msgs::Odometry& odom,
+                            const nav_msgs::Path& obs_path) const
+  {
+    if (obs_path.poses.size() < 2) return false;
+
+    const ros::Time now = ros::Time::now();
+    const double age = (now - obs_path.header.stamp).toSec();
+    if (age > temporal_path_max_age_) return false;
+
+    const auto& p0 = obs_path.poses.front().pose.position;
+    const auto& p1 = obs_path.poses[1].pose.position;
+    const double ovx = p1.x - p0.x;
+    const double ovy = p1.y - p0.y;
+    const double ospeed = std::hypot(ovx, ovy);
+    if (ospeed < 1e-3) return false;  // prekazka stoji -> nie follow
+
+    const double yaw = yawFromQuaternion(odom.pose.pose.orientation);
+    const double hx = std::cos(yaw);
+    const double hy = std::sin(yaw);
+
+    // 1) prekazka je pred robotom
+    const double rx = p0.x - odom.pose.pose.position.x;
+    const double ry = p0.y - odom.pose.pose.position.y;
+    const double forward_proj = rx * hx + ry * hy;
+    if (forward_proj <= 0.0) return false;
+
+    // 2) prekazka sa pohybuje priblizne v smere robotovho heading
+    //    (cos uhlu > 0.5 => uhol < 60 deg)
+    const double align = (ovx * hx + ovy * hy) / ospeed;
+    return align > 0.5;
+  }
+
   // ---- Temporal overlap check ------------------------------------------
   //
   // dynamic_obstacle_predictor publikuje /predicted_obstacle_path ako
@@ -800,6 +945,13 @@ private:
       if (penalized)
         score += 10.0;
 
+      // Secondary: preferuj trajektorie, ktore zostanu dalej od predikcie
+      // prekazky. Pri rovnakom t_exit to rozbije tie medzi REV / REV_L / REV_R.
+      // Tento bonus nemoze preklopit FWD vs REV poradie, lebo BLOCKED
+      // kandidati nedostanu skore vobec.
+      if (std::isfinite(s.min_obs_dist))
+        score -= 0.01 * std::min(s.min_obs_dist, 3.0);
+
       oss << "t=" << s.t_exit
           << " d=" << (std::isfinite(s.min_obs_dist) ? s.min_obs_dist : -1.0)
           << " s=" << score
@@ -822,6 +974,193 @@ private:
     out.linear.y = 0.0;
     out.angular.z = candidates[best_idx].w;
     mode_out = candidates[best_idx].name;
+    return true;
+  }
+
+  // Forward-simuluje robota cez headon_horizon_ a meria min vzdialenost
+  // od /predicted_obstacle_path v casovo zarovnanych krokoch.
+  //
+  // Feasibility: povodne sme blokovali ak ktorykolvek step bol v lethal,
+  // ale pri vacsich rychlostiach / siroch arcov casto jeden neskorsi
+  // cell v PredictedSweepRiskLayer corridor-e (cost ≥ 85) zablokoval
+  // VSETKY REV_L/REV_R kandidatov a fallback vybral cistu reverze.
+  //
+  // Nova logika: blokujeme iba ak prvych `headon_min_feasible_steps_`
+  // kokov je v lethal (bezprostredna kolizia — ani nezacneme manever).
+  // Neskorsi lethal iba preruseni akumulaciu `min_obs_dist` — dalsi
+  // cmd_vel tick (10 Hz) reevaluuje situaciu s novym stavom a vyberie
+  // dalsi kandidat. Toto umoznuje manevru startnut aj ked arc neskor
+  // preletí cez sweep corridor, ktory sa medzi tikmi hybe s prekazkou.
+  HeadOnScore evaluateHeadOnCandidate(const nav_msgs::Odometry& odom,
+                                       const nav_msgs::OccupancyGrid& cm,
+                                       const nav_msgs::Path& obs_path,
+                                       double v, double w) const
+  {
+    HeadOnScore s;
+    s.feasible = false;
+
+    const double yaw0 = yawFromQuaternion(odom.pose.pose.orientation);
+    double cx = odom.pose.pose.position.x;
+    double cy = odom.pose.pose.position.y;
+    double cyaw = yaw0;
+
+    const int n_steps = static_cast<int>(std::ceil(headon_horizon_ / prediction_dt_));
+    const double obs_age = (ros::Time::now() - obs_path.header.stamp).toSec();
+    const int n_obs = static_cast<int>(obs_path.poses.size());
+    const bool obs_valid = (obs_age <= temporal_path_max_age_) && (n_obs > 0);
+
+    for (int i = 1; i <= n_steps; ++i)
+    {
+      cyaw += w * prediction_dt_;
+      cx   += v * std::cos(cyaw) * prediction_dt_;
+      cy   += v * std::sin(cyaw) * prediction_dt_;
+
+      const bool lethal_here = cellLethal(cm, cx, cy);
+
+      if (lethal_here && i <= headon_min_feasible_steps_)
+      {
+        // Bezprostredna kolizia v prvych N krokoch → candidate truly blocked.
+        return s;
+      }
+
+      // Prezili sme aspon prvy lethal-free step → candidate je feasible.
+      // Dalsie lethal steps neblokuju, iba preruseni scoring.
+      s.feasible = true;
+
+      if (lethal_here)
+        break;
+
+      if (obs_valid)
+      {
+        const double t_abs = obs_age + static_cast<double>(i) * prediction_dt_;
+        const int k = static_cast<int>(std::round(t_abs / obstacle_prediction_dt_));
+        if (k >= 0 && k < n_obs)
+        {
+          const auto& op = obs_path.poses[k].pose.position;
+          const double d = std::hypot(cx - op.x, cy - op.y);
+          s.min_obs_dist = std::min(s.min_obs_dist, d);
+        }
+      }
+    }
+    return s;
+  }
+
+  // Vyber HEAD-ON manevru: dvojfazovy picker.
+  // 1. faza: len SWERVE_L a SWERVE_R — ak je aspon jeden feasible,
+  //    vyberie sa ten s vyssim min_obs_dist (+ strana-lock bonus).
+  //    Zmysel: head-on sa ma PREDBEHNUT/OBIST, nie uniknut dozadu.
+  // 2. faza (fallback): REV, REV_L, REV_R — iba ked sa swerve neda.
+  // Strana-lock hysteréza: ak posledny pick bol L do headon_side_lock_time_
+  // dozadu, k Lavym kandidatom pripocitame maly bonus, aby sme nepreskakovali.
+  bool selectHeadOnManeuver(const nav_msgs::Odometry& odom,
+                             const nav_msgs::OccupancyGrid& cm,
+                             const nav_msgs::Path& obs_path,
+                             geometry_msgs::Twist& out,
+                             const char*& mode_out,
+                             std::string& scores_out) const
+  {
+    // Primarna strategia: reverse + turn (cuvanie so zatacanim).
+    // Robot cuvne a sucasne rotuje, cim sa odklona od head-on kurzu
+    // a nasledny TEB plan dokaze prekazku obist zboku.
+    const HeadOnCandidate rev_turn_candidates[] = {
+        {  headon_rev_v_,+headon_w_,  +1, "HEADON_REV_L"    },
+        {  headon_rev_v_,-headon_w_,  -1, "HEADON_REV_R"    },
+    };
+    // Fallback 1: cista reverze (bez rotacie), ak oba rev+turn su blocked.
+    // Fallback 2: forward swerve, posledna moznost ked zadne varianty blokuje stena.
+    const HeadOnCandidate fallback_candidates[] = {
+        {  headon_rev_v_, 0.0,         0, "HEADON_REV"      },
+        { +headon_v_,    +headon_w_,  +1, "HEADON_SWERVE_L" },
+        { +headon_v_,    -headon_w_,  -1, "HEADON_SWERVE_R" },
+    };
+
+    const ros::Time now = ros::Time::now();
+    const bool lock_active = (last_headon_side_ != 0) &&
+                              !last_headon_time_.isZero() &&
+                              ((now - last_headon_time_).toSec() < headon_side_lock_time_);
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2);
+
+    auto score_group = [&](const HeadOnCandidate* arr, std::size_t n,
+                            int& best_idx, double& best_score) {
+      best_idx = -1;
+      best_score = -std::numeric_limits<double>::infinity();
+      for (std::size_t i = 0; i < n; ++i)
+      {
+        // Hard lock: pocas side-lock okna uplne preskocime kandidatov opacnej
+        // strany — nescorujeme, ani nekandidujeme. Zabranuje kmitaniu medzi
+        // REV_L/REV_R ked su obe symetricky dobre a noise v min_obs_dist
+        // by inak flippol stranu.
+        if (headon_hard_lock_ && lock_active &&
+            arr[i].side != 0 && arr[i].side != last_headon_side_)
+        {
+          oss << " " << arr[i].name << "[LOCKED]";
+          continue;
+        }
+
+        const HeadOnScore s = evaluateHeadOnCandidate(odom, cm, obs_path,
+                                                       arr[i].v, arr[i].w);
+        oss << " " << arr[i].name << "[";
+        if (!s.feasible)
+        {
+          oss << "BLOCKED]";
+          continue;
+        }
+        double score = std::isfinite(s.min_obs_dist) ? s.min_obs_dist : 999.0;
+        const bool boosted = (lock_active && arr[i].side == last_headon_side_);
+        if (boosted) score += headon_side_lock_bonus_;
+        oss << "d=" << (std::isfinite(s.min_obs_dist) ? s.min_obs_dist : -1.0)
+            << " s=" << score
+            << (boosted ? " *" : "")
+            << "]";
+        if (score > best_score)
+        {
+          best_score = score;
+          best_idx = static_cast<int>(i);
+        }
+      }
+    };
+
+    // 1. faza: REV+turn (primarna strategia).
+    int rev_turn_best = -1;
+    double rev_turn_score = 0.0;
+    score_group(rev_turn_candidates,
+                sizeof(rev_turn_candidates) / sizeof(rev_turn_candidates[0]),
+                rev_turn_best, rev_turn_score);
+
+    const HeadOnCandidate* picked = nullptr;
+    if (rev_turn_best >= 0)
+    {
+      picked = &rev_turn_candidates[rev_turn_best];
+    }
+    else
+    {
+      // 2. faza (fallback): REV straight + SWERVE.
+      int fb_best = -1;
+      double fb_score = 0.0;
+      score_group(fallback_candidates,
+                  sizeof(fallback_candidates) / sizeof(fallback_candidates[0]),
+                  fb_best, fb_score);
+      if (fb_best >= 0)
+        picked = &fallback_candidates[fb_best];
+    }
+
+    scores_out = oss.str();
+
+    if (!picked)
+      return false;
+
+    out.linear.x = picked->v;
+    out.linear.y = 0.0;
+    out.angular.z = picked->w;
+    mode_out = picked->name;
+
+    if (picked->side != 0)
+    {
+      last_headon_side_ = picked->side;
+      last_headon_time_ = now;
+    }
     return true;
   }
 
@@ -917,6 +1256,25 @@ private:
   double escape_horizon_;
   double escape_v_;
   double escape_w_;
+
+  // Head-on maneuver
+  double headon_v_;
+  double headon_w_;
+  double headon_rev_v_;
+  double headon_horizon_;
+  double headon_side_lock_time_;
+  double headon_side_lock_bonus_;
+  bool   headon_hard_lock_;
+  int    headon_min_feasible_steps_;
+  // Strana-lock hysteréza: -1 = R, 0 = none, +1 = L
+  mutable int    last_headon_side_ = 0;
+  mutable ros::Time last_headon_time_;
+
+  // Command latch (viď cmd_latch_time_ komentar pri param loadingu).
+  double cmd_latch_time_;
+  mutable ros::Time cmd_latch_until_;
+  mutable geometry_msgs::Twist cmd_latch_value_;
+  mutable std::string cmd_latch_reason_;
 };
 
 }  // namespace
