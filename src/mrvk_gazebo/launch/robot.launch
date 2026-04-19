@@ -78,11 +78,12 @@
 
     <!-- <node name="image_view" pkg="image_view" type="image_view" args="image:=/camera/image_raw"/>-->
 
-    <!-- gmapping pise "Laser Pose=" / "Registering Scans:Done" priamo na stdout
-         z openslam kniznice (obchadza ROS logger), takze output="log" to
-         neodfiltruje. Presmerujeme stdout na /dev/null cez launch-prefix. -->
+    <!-- gmapping pise "Laser Pose=" / "Registering Scans:Done" priamo z
+         openslam kniznice (obchadza ROS logger), casto na stderr. Output="log"
+         to neodfiltruje, takze presmerujeme stdout aj stderr na /dev/null
+         cez launch-prefix. -->
     <node name="slam_gmapping" pkg="gmapping" type="slam_gmapping"
-          launch-prefix="bash -c 'exec &quot;$@&quot; 1&gt;/dev/null' bash">
+          launch-prefix="bash -c 'exec &quot;$@&quot; 1&gt;/dev/null 2&gt;/dev/null' bash">
         <rosparam command="load" file="$(find mrvk_gazebo)/config/slam/gmapping.yaml"/>
         <remap from="/scan" to="$(arg laser_topic)"/>
     </node>

@@ -17,7 +17,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES predicted_sweep_risk_layer
+  LIBRARIES predicted_sweep_risk_layer predicted_path_obstacle_layer
   CATKIN_DEPENDS
     roscpp
     geometry_msgs
@@ -89,11 +89,25 @@ add_dependencies(predicted_sweep_risk_layer
   ${catkin_EXPORTED_TARGETS}
 )
 
+add_library(predicted_path_obstacle_layer
+  src/predicted_path_obstacle_layer.cpp
+)
+
+target_link_libraries(predicted_path_obstacle_layer
+  ${catkin_LIBRARIES}
+)
+
+add_dependencies(predicted_path_obstacle_layer
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+
 install(TARGETS
   dynamic_obstacle_predictor
   safe_zone_goal_router
   robot_motion_predictor
   predicted_sweep_risk_layer
+  predicted_path_obstacle_layer
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
@@ -104,6 +118,8 @@ install(DIRECTORY include/${PROJECT_NAME}/
   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
 )
 
-install(FILES predicted_sweep_risk_layer.xml
+install(FILES
+  predicted_sweep_risk_layer.xml
+  predicted_path_obstacle_layer.xml
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )

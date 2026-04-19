@@ -30,6 +30,23 @@ obstacles:
   observation_persistence: 0.0
   expected_update_rate: 0.0
 
+# Zapisuje lethal bunky pozdlz /predicted_obstacle_path priamo na master grid
+# v updateCosts. Bez perzistencie — kazdy cyklus sa prekresli z aktualneho
+# path, takze stare predikcie automaticky miznu (ziadne artefakty ako pri
+# PointCloud -> ObstacleLayer). Cells v robot_exclusion_radiuse sa preskakuju.
+predicted_path_obstacle_layer:
+  enabled: true
+  path_topic: /predicted_obstacle_path
+  obstacle_radius: 0.25
+  max_path_length: 3.0
+  robot_exclusion_radius: 0.55
+  path_staleness_tolerance: 0.5
+  # Zamerne POD lethal_threshold (85) v robot_motion_predictor — cloud
+  # ma sluzit TEB-u ako silne repulzivne pole, nie spustac pre
+  # LETHAL_ESCAPE / runPrediction REVERSE. Cellula s cost=80 nevyvola
+  # cellLethal() a nezablokuje kandidatov v selectHeadOnManeuver.
+  cost_value: 80
+
 predicted_sweep_risk_layer:
   enabled: true
 
@@ -81,7 +98,7 @@ predicted_sweep_risk_layer:
 
 inflation_layer:
   enabled: true
-  inflation_radius: 0.6
+  inflation_radius: 0.3
   cost_scaling_factor: 2.5
 
 obstacle_range: 3.4

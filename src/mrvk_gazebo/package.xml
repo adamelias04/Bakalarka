@@ -50,5 +50,6 @@
 
   <export>
     <costmap_2d plugin="${prefix}/predicted_sweep_risk_layer.xml"/>
+    <costmap_2d plugin="${prefix}/predicted_path_obstacle_layer.xml"/>
   </export>
 </package>

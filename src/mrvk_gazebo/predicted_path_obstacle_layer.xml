@@ -1,0 +1,11 @@
+<library path="lib/libpredicted_path_obstacle_layer">
+  <class name="mrvk_gazebo::PredictedPathObstacleLayer"
+         type="mrvk_gazebo::PredictedPathObstacleLayer"
+         base_class_type="costmap_2d::Layer">
+    <description>
+      Costmap layer that stamps LETHAL cells along /predicted_obstacle_path.
+      Refreshes every costmap update cycle, so there is no mark accumulation.
+      Cells within robot_exclusion_radius of the robot are skipped.
+    </description>
+  </class>
+</library>

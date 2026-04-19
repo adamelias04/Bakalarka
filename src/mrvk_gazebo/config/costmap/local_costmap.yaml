@@ -15,4 +15,5 @@ local_costmap:
 
   plugins:
     - {name: obstacles, type: "costmap_2d::ObstacleLayer"}
+    - {name: predicted_path_obstacle_layer, type: "mrvk_gazebo::PredictedPathObstacleLayer"}
     - {name: inflation_layer, type: "costmap_2d::InflationLayer"}
