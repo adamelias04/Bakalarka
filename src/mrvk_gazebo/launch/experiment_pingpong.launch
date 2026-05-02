@@ -1,0 +1,31 @@
+<launch>
+    <!-- Spusti celu robotsku stack a po kratkej pauze zacne posielat
+         alternujuce ciele medzi (3,0) a (-3,0) v map frame.
+         Pauza medzi cielmi je nahodna z intervalu [min_pause, max_pause]. -->
+
+    <arg name="num_goals"    default="10"/>
+    <arg name="min_pause"    default="0.0"/>
+    <arg name="max_pause"    default="10.0"/>
+    <arg name="goal_timeout" default="120.0"/>
+    <arg name="startup_delay" default="15.0"/>
+    <arg name="seed"         default="-1"/>
+
+    <include file="$(find mrvk_gazebo)/launch/robot.launch"/>
+
+    <!-- launch-prefix daje cas aby sa gazebo, move_base a gmapping
+         stihli inicializovat predtym ako posleme prvy ciel. -->
+    <node pkg="mrvk_gazebo" type="goal_pinger" name="goal_pinger"
+          output="screen"
+          launch-prefix="bash -c 'sleep $(arg startup_delay); $0 $@'">
+        <param name="num_goals"    value="$(arg num_goals)"/>
+        <param name="min_pause"    value="$(arg min_pause)"/>
+        <param name="max_pause"    value="$(arg max_pause)"/>
+        <param name="goal_timeout" value="$(arg goal_timeout)"/>
+        <param name="point_a_x"    value="3.0"/>
+        <param name="point_a_y"    value="0.0"/>
+        <param name="point_b_x"    value="-3.0"/>
+        <param name="point_b_y"    value="0.0"/>
+        <param name="frame_id"     value="odom"/>
+        <param name="seed" value="$(arg seed)" if="$(eval arg('seed') >= 0)"/>
+    </node>
+</launch>

@@ -303,15 +303,53 @@ private:
       const ros::Time now_latch = ros::Time::now();
       if (!cmd_latch_until_.isZero() && now_latch < cmd_latch_until_)
       {
-        ROS_WARN_THROTTLE(1.0,
-                          "RobotMotionPredictor: %s LATCH hold (v=%.2f w=%.2f) "
-                          "remaining=%.2fs cmd=(v=%.2f w=%.2f)",
-                          cmd_latch_reason_.c_str(),
-                          cmd_latch_value_.linear.x, cmd_latch_value_.angular.z,
-                          (cmd_latch_until_ - now_latch).toSec(),
-                          msg->linear.x, msg->angular.z);
-        cmd_pub_.publish(cmd_latch_value_);
-        return;
+        // Latch-break: stare HEADON/ESCAPE reverze sa nema drzat ked sa
+        // situacia zmenila na jednoznacny CROSSING. Ak mame fresh obs_path
+        // a aktualny scenar je tc.present && !isHeadOnScenario (kolmy
+        // crossing), latch okamzite zhasneme — robot prestane cuvat a na
+        // dalsom kole temporal classifier zvoli TEMPORAL_STOP.
+        bool break_latch = false;
+        {
+          nav_msgs::Path obs_peek;
+          bool have_obs_peek = false;
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (has_obstacle_path_)
+            {
+              obs_peek = latest_obstacle_path_;
+              have_obs_peek = true;
+            }
+          }
+          if (have_obs_peek)
+          {
+            const TemporalConflict tc_peek = checkTemporalConflict(
+                odom, obs_peek, msg->linear.x, msg->angular.z);
+            if (tc_peek.present && !isHeadOnScenario(odom, obs_peek))
+              break_latch = true;
+          }
+        }
+
+        if (break_latch)
+        {
+          ROS_WARN_THROTTLE(1.0,
+                            "RobotMotionPredictor: %s LATCH broken (scenario "
+                            "now CROSSING, was reverse cmd=%.2f)",
+                            cmd_latch_reason_.c_str(),
+                            cmd_latch_value_.linear.x);
+          cmd_latch_until_ = ros::Time(0);
+        }
+        else
+        {
+          ROS_WARN_THROTTLE(1.0,
+                            "RobotMotionPredictor: %s LATCH hold (v=%.2f w=%.2f) "
+                            "remaining=%.2fs cmd=(v=%.2f w=%.2f)",
+                            cmd_latch_reason_.c_str(),
+                            cmd_latch_value_.linear.x, cmd_latch_value_.angular.z,
+                            (cmd_latch_until_ - now_latch).toSec(),
+                            msg->linear.x, msg->angular.z);
+          cmd_pub_.publish(cmd_latch_value_);
+          return;
+        }
       }
     }
 
@@ -476,11 +514,19 @@ private:
       {
         const char* tmode = nullptr;
 
-        // Klasifikacia: zastavenie riesi konflikt?
+        // Klasifikacia:
+        //   HEAD-ON iba ak:
+        //     (a) prekazka aktivne ide PROTI robotovmu headingu (dot < -0.5)
+        //     (b) zastavenie by konflikt nevyriesilo
+        //   Oboje je nutne. Kolmy crossing moze obcas splnat (b) v boundary
+        //   tickoch (tc_stop flicker), ale (a) zostava false -> neskocime
+        //   do HEADON manevru ani nezalatchneme reverse -> ziadne dlhe cuvanie.
         const TemporalConflict tc_stop =
             checkTemporalConflict(odom, obs_path_local, 0.0, 0.0);
+        const bool head_on = tc_stop.present &&
+                             isHeadOnScenario(odom, obs_path_local);
 
-        if (!tc_stop.present)
+        if (!head_on)
         {
           // CROSSING — prekazka pretina cestu, zastavenie staci.
           // Angular zachovame, nech TEB moze rotovat.
@@ -770,6 +816,33 @@ private:
     //    (cos uhlu > 0.5 => uhol < 60 deg)
     const double align = (ovx * hx + ovy * hy) / ospeed;
     return align > 0.5;
+  }
+
+  // Smerovy HEAD-ON test: prekazka aktivne ide PROTI robotovi
+  // (dot(obs_vel_dir, heading) < -0.5, t.j. uhol > 120 deg).
+  // Pure crossing (kolmo) ma dot ~ 0 -> nie head-on.
+  bool isHeadOnScenario(const nav_msgs::Odometry& odom,
+                        const nav_msgs::Path& obs_path) const
+  {
+    if (obs_path.poses.size() < 2) return false;
+
+    const ros::Time now = ros::Time::now();
+    const double age = (now - obs_path.header.stamp).toSec();
+    if (age > temporal_path_max_age_) return false;
+
+    const auto& p0 = obs_path.poses.front().pose.position;
+    const auto& p1 = obs_path.poses[1].pose.position;
+    const double ovx = p1.x - p0.x;
+    const double ovy = p1.y - p0.y;
+    const double ospeed = std::hypot(ovx, ovy);
+    if (ospeed < 1e-3) return false;
+
+    const double yaw = yawFromQuaternion(odom.pose.pose.orientation);
+    const double hx = std::cos(yaw);
+    const double hy = std::sin(yaw);
+
+    const double align = (ovx * hx + ovy * hy) / ospeed;
+    return align < -0.5;
   }
 
   // ---- Temporal overlap check ------------------------------------------

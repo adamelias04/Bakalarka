@@ -13,6 +13,8 @@ find_package(catkin REQUIRED COMPONENTS
   tf2_geometry_msgs
   costmap_2d
   pluginlib
+  actionlib
+  move_base_msgs
 )
 
 catkin_package(
@@ -30,6 +32,8 @@ catkin_package(
     tf2_geometry_msgs
     costmap_2d
     pluginlib
+    actionlib
+    move_base_msgs
 )
 
 include_directories(
@@ -49,6 +53,10 @@ add_executable(robot_motion_predictor
   src/robot_motion_predictor.cpp
 )
 
+add_executable(goal_pinger
+  src/goal_pinger.cpp
+)
+
 target_link_libraries(dynamic_obstacle_predictor
   ${catkin_LIBRARIES}
 )
@@ -58,6 +66,10 @@ target_link_libraries(safe_zone_goal_router
 )
 
 target_link_libraries(robot_motion_predictor
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(goal_pinger
   ${catkin_LIBRARIES}
 )
 
@@ -72,6 +84,11 @@ add_dependencies(safe_zone_goal_router
 )
 
 add_dependencies(robot_motion_predictor
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+
+add_dependencies(goal_pinger
   ${${PROJECT_NAME}_EXPORTED_TARGETS}
   ${catkin_EXPORTED_TARGETS}
 )
@@ -106,6 +123,7 @@ install(TARGETS
   dynamic_obstacle_predictor
   safe_zone_goal_router
   robot_motion_predictor
+  goal_pinger
   predicted_sweep_risk_layer
   predicted_path_obstacle_layer
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
